@@ -100,30 +100,31 @@ def main():
     eq_hold = 1000 * np.cumprod(1 + basket)
     rep("IMMER-HALTEN (gekappter Gleichgewicht-Korb)", eq_hold, idx)
 
-    if btc is None:
-        print("\nKein BTC-Pair gefunden (BTC_USDC/BTC_USDT) -> Regime-Schalter nicht moeglich.")
-        print("Sag mir, wie dein BTC-Pair heisst, dann haenge ich es ein.")
-        return
-
-    # Regime auf TAGESBASIS (robust gegen lueckenhafte 1h-Daten):
-    # BTC auf Tage resampeln, 30-Tage-MA, Entscheidung aus dem VORTAG (kein Look-ahead).
-    REGIME_MA_DAYS = 30
     dt = pd.to_datetime(idx, unit="ms", utc=True)
-    btc_raw = pd.to_numeric(px[btc], errors="coerce")
-    btc_s = pd.Series(btc_raw.values, index=dt).ffill()
-    n_valid = int(np.isfinite(btc_s.values).sum())
-    btc_daily = btc_s.resample("1D").last().ffill()
-    ma_daily = btc_daily.rolling(REGIME_MA_DAYS, min_periods=10).mean()
-    on = (btc_daily > ma_daily).shift(1).fillna(False)   # Vortag -> kein Look-ahead
-    # bulletproof: Mapping ueber Datums-String (keine tz/freq/dtype-Fallen)
+    # Regime-Quelle waehlen: BTC, falls es genug Historie hat (>=40 Tage), sonst
+    # der Korb-Index selbst (sein eigener Trend) -> robust gegen duennes BTC-Paar.
+    use_btc = False
+    if btc is not None:
+        bspan = pd.Series(pd.to_numeric(px[btc], errors="coerce").values, index=dt).dropna()
+        if len(bspan) and (bspan.index.max() - bspan.index.min()).days >= 40:
+            use_btc = True
+    if use_btc:
+        market = pd.Series(pd.to_numeric(px[btc], errors="coerce").values, index=dt).ffill()
+        src = f"BTC ({btc})"
+    else:
+        market = pd.Series(eq_hold, index=dt)
+        src = "Korb-Index (eigener Trend)"
+
+    # Regime auf TAGESBASIS: Markt-Serie auf Tage resampeln, 30-Tage-MA,
+    # Entscheidung aus dem VORTAG (kein Look-ahead).
+    REGIME_MA_DAYS = 30
+    daily = market.resample("1D").last().ffill()
+    ma_daily = daily.rolling(REGIME_MA_DAYS, min_periods=10).mean()
+    on = (daily > ma_daily).shift(1).fillna(False)   # Vortag -> kein Look-ahead
     on_by_date = {ts.strftime("%Y-%m-%d"): bool(v) for ts, v in on.items()}
     risk_on = np.array([on_by_date.get(k, False) for k in dt.strftime("%Y-%m-%d")])
-    # Diagnose
-    vdates = btc_s.dropna()
-    print(f"\n  [Diagnose] BTC-Spalte='{btc}'  gueltige BTC-Bars={n_valid}/{len(dt)}  "
-          f"Spanne={vdates.index.min()} .. {vdates.index.max()}")
-    print(f"  [Diagnose] Regime risk-on an {int(on.sum())}/{len(on)} Tagen  "
-          f"-> {risk_on.sum()}/{len(risk_on)} Bars im Markt")
+    print(f"\n  [Diagnose] Regime-Quelle: {src}   Tage gesamt={len(daily)}")
+    print(f"  [Diagnose] risk-on an {int(on.sum())}/{len(on)} Tagen  -> {int(risk_on.sum())}/{len(risk_on)} Bars im Markt")
 
     eq = 1000.0; curve = np.empty(len(idx)); curve[0] = 1000.0; invested = False
     days_in = 0
@@ -138,7 +139,7 @@ def main():
                 eq *= (1 - SWITCH_FEE); invested = False   # aussteigen in Cash
         curve[i] = eq
     pct_in = days_in / (len(idx) - 1) * 100
-    rep("REGIME-GESCHALTET (BTC > 30-Tage-MA = halten, sonst Cash)",
+    rep(f"REGIME-GESCHALTET ({src} > 30-Tage-MA = halten, sonst Cash)",
         curve, idx, extra=f"   [{pct_in:.0f}% der Zeit im Markt]")
 
     print("\n" + "=" * 92)
