@@ -103,13 +103,16 @@ def main():
         print("Sag mir, wie dein BTC-Pair heisst, dann haenge ich es ein.")
         return
 
-    bt = px[btc].values.astype(float)
-    bt_ma = pd.Series(bt).rolling(REGIME_MA).mean().values
-    # risk_on fuer Bar i aus Info bis i-1 (kein Look-ahead)
-    risk_on = np.zeros(len(idx), bool)
-    for i in range(1, len(idx)):
-        if np.isfinite(bt_ma[i-1]) and bt[i-1] > bt_ma[i-1]:
-            risk_on[i] = True
+    # Regime auf TAGESBASIS (robust gegen lueckenhafte 1h-Daten):
+    # BTC auf Tage resampeln, 30-Tage-MA, Entscheidung aus dem VORTAG (kein Look-ahead).
+    REGIME_MA_DAYS = 30
+    dt = pd.to_datetime(idx, unit="ms", utc=True)
+    btc_s = pd.Series(px[btc].values, index=dt).ffill()
+    btc_daily = btc_s.resample("1D").last().ffill()
+    ma_daily = btc_daily.rolling(REGIME_MA_DAYS).mean()
+    regime_daily = (btc_daily > ma_daily).shift(1).fillna(False)   # Vortag -> kein Look-ahead
+    day = dt.floor("D")
+    risk_on = regime_daily.reindex(day).fillna(False).to_numpy()
 
     eq = 1000.0; curve = np.empty(len(idx)); curve[0] = 1000.0; invested = False
     days_in = 0
@@ -124,7 +127,7 @@ def main():
                 eq *= (1 - SWITCH_FEE); invested = False   # aussteigen in Cash
         curve[i] = eq
     pct_in = days_in / (len(idx) - 1) * 100
-    rep(f"REGIME-GESCHALTET (BTC > {REGIME_MA//BARS_PER_DAY}-Tage-MA = halten, sonst Cash)",
+    rep("REGIME-GESCHALTET (BTC > 30-Tage-MA = halten, sonst Cash)",
         curve, idx, extra=f"   [{pct_in:.0f}% der Zeit im Markt]")
 
     print("\n" + "=" * 92)
