@@ -59,6 +59,8 @@ def load_matrix():
     px = pd.DataFrame(ser).sort_index()
     px = px[~px.index.duplicated(keep="last")]
     btc_col = next((c for c in ("BTC_USDC", "BTC_USDT", "BTCUSDC", "BTCUSDT") if c in px.columns), None)
+    if btc_col is None:  # flexibel: irgendeine Spalte, die mit BTC beginnt
+        btc_col = next((c for c in px.columns if c.upper().startswith("BTC")), None)
     return px, btc_col
 
 
@@ -107,12 +109,21 @@ def main():
     # BTC auf Tage resampeln, 30-Tage-MA, Entscheidung aus dem VORTAG (kein Look-ahead).
     REGIME_MA_DAYS = 30
     dt = pd.to_datetime(idx, unit="ms", utc=True)
-    btc_s = pd.Series(px[btc].values, index=dt).ffill()
+    btc_raw = pd.to_numeric(px[btc], errors="coerce")
+    btc_s = pd.Series(btc_raw.values, index=dt).ffill()
+    n_valid = int(np.isfinite(btc_s.values).sum())
     btc_daily = btc_s.resample("1D").last().ffill()
-    ma_daily = btc_daily.rolling(REGIME_MA_DAYS).mean()
-    regime_daily = (btc_daily > ma_daily).shift(1).fillna(False)   # Vortag -> kein Look-ahead
-    day = dt.floor("D")
-    risk_on = regime_daily.reindex(day).fillna(False).to_numpy()
+    ma_daily = btc_daily.rolling(REGIME_MA_DAYS, min_periods=10).mean()
+    on = (btc_daily > ma_daily).shift(1).fillna(False)   # Vortag -> kein Look-ahead
+    # bulletproof: Mapping ueber Datums-String (keine tz/freq/dtype-Fallen)
+    on_by_date = {ts.strftime("%Y-%m-%d"): bool(v) for ts, v in on.items()}
+    risk_on = np.array([on_by_date.get(k, False) for k in dt.strftime("%Y-%m-%d")])
+    # Diagnose
+    vdates = btc_s.dropna()
+    print(f"\n  [Diagnose] BTC-Spalte='{btc}'  gueltige BTC-Bars={n_valid}/{len(dt)}  "
+          f"Spanne={vdates.index.min()} .. {vdates.index.max()}")
+    print(f"  [Diagnose] Regime risk-on an {int(on.sum())}/{len(on)} Tagen  "
+          f"-> {risk_on.sum()}/{len(risk_on)} Bars im Markt")
 
     eq = 1000.0; curve = np.empty(len(idx)); curve[0] = 1000.0; invested = False
     days_in = 0
