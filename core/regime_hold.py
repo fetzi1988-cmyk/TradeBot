@@ -78,8 +78,10 @@ def top_by_volume(candles_dir, tf, n):
             continue
         if "close" not in d or "volume" not in d or len(d) < 60:
             continue
-        qv = (pd.to_numeric(d["close"], errors="coerce") *
-              pd.to_numeric(d["volume"], errors="coerce")).median()
+        cc = pd.to_numeric(d["close"], errors="coerce").dropna()
+        if len(cc) < 60 or cc.min() <= 0 or cc.max() / cc.min() < 1.5:
+            continue    # Stablecoin/Peg (bewegt sich nie >50%) -> totes Gewicht, raus
+        qv = (cc * pd.to_numeric(d["volume"], errors="coerce")).median()
         if np.isfinite(qv) and qv > 0:
             rows.append((key, qv))
     rows.sort(key=lambda x: -x[1])

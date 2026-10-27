@@ -25,7 +25,7 @@ import pandas as pd
 
 DAILY_DIR = "data/daily"
 REGIME_MA_DAYS = 150
-TOP_N = 40                 # Korb = die TOP_N groessten Coins nach Volumen
+TOP_N = int(os.getenv("REGIME_TOPN", "10"))   # Korb-Breite (Default 10; per REGIME_TOPN aenderbar)
 FALLBACK = ["BTC_USDC", "ETH_USDC", "SOL_USDC", "BNB_USDC", "XRP_USDC"]
 START_CAPITAL = 1000.0
 STATE = sys.argv[1] if len(sys.argv) > 1 else "logs/regime_live_state.json"
@@ -83,8 +83,10 @@ def select_universe(n=TOP_N):
             continue
         if "close" not in d or "volume" not in d or len(d) < REGIME_MA_DAYS:
             continue
-        qv = (pd.to_numeric(d["close"], errors="coerce") *
-              pd.to_numeric(d["volume"], errors="coerce")).median()
+        cc = pd.to_numeric(d["close"], errors="coerce").dropna()
+        if len(cc) < REGIME_MA_DAYS or cc.min() <= 0 or cc.max() / cc.min() < 1.5:
+            continue    # Stablecoin/Peg -> raus (kein Aufwaertspotenzial)
+        qv = (cc * pd.to_numeric(d["volume"], errors="coerce")).median()
         if np.isfinite(qv) and qv > 0:
             rows.append((key, qv))
     rows.sort(key=lambda x: -x[1])
