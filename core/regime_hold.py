@@ -58,7 +58,7 @@ def load_matrix():
         return None, None
     px = pd.DataFrame(ser).sort_index()
     px = px[~px.index.duplicated(keep="last")]
-    btc_col = next((c for c in ("BTC_USDC", "BTC_USDT", "BTCUSDC", "BTCUSDT") if c in px.columns), None)
+    btc_col = next((c for c in ("BTC_USDT", "BTC_USDC", "BTCUSDT", "BTCUSDC") if c in px.columns), None)
     if btc_col is None:  # flexibel: irgendeine Spalte, die mit BTC beginnt
         btc_col = next((c for c in px.columns if c.upper().startswith("BTC")), None)
     return px, btc_col
@@ -90,11 +90,18 @@ def main():
     if px is None:
         print(f"Keine {TF}-Daten in {CANDLES}."); return
     idx = px.index.values
-    rets = np.clip(px.pct_change().values, -CLIP, CLIP)   # Outlier-gekappt
+    # optionaler Instrument-Filter: argv[4] = Komma-Liste von Key-Fragmenten
+    # (z.B. "BTC_USDT" oder "BTC_,ETH_,SOL_,BNB_,XRP_"). Ohne -> alle Coins.
+    wl = [w.strip() for w in sys.argv[4].split(",")] if len(sys.argv) > 4 else None
+    bcols = [c for c in px.columns if (wl is None or any(w in c for w in wl))]
+    rets = np.clip(px[bcols].pct_change().values, -CLIP, CLIP)   # Outlier-gekappt
     basket = np.nan_to_num(np.nanmean(rets, axis=1), nan=0.0)
 
     print("=" * 92)
-    print(f"REGIME-HALTEN   {px.shape[1]} Coins, TF={TF}, {len(idx)} Bars   (Per-Bar-Rendite auf +-{CLIP*100:.0f}% gekappt)")
+    print(f"REGIME-HALTEN   Korb={len(bcols)} Coins von {px.shape[1]}, TF={TF}, {len(idx)} Bars   "
+          f"(Per-Bar auf +-{CLIP*100:.0f}% gekappt)")
+    if wl is not None:
+        print(f"  Instrument-Filter: {wl}  ->  {', '.join(bcols[:12])}{' ...' if len(bcols) > 12 else ''}")
     print("=" * 92)
 
     eq_hold = 1000 * np.cumprod(1 + basket)
@@ -140,7 +147,7 @@ def main():
                 eq *= (1 - SWITCH_FEE); invested = False   # aussteigen in Cash
         curve[i] = eq
     pct_in = days_in / (len(idx) - 1) * 100
-    rep(f"REGIME-GESCHALTET ({src} > 30-Tage-MA = halten, sonst Cash)",
+    rep(f"REGIME-GESCHALTET ({src} > {REGIME_MA_DAYS}-Tage-MA = halten, sonst Cash)",
         curve, idx, extra=f"   [{pct_in:.0f}% der Zeit im Markt]")
 
     print("\n" + "=" * 92)
