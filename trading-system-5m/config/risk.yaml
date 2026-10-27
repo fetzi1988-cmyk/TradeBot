@@ -1,0 +1,74 @@
+atr_stake_factor_min: 0.5
+atr_stake_reference: 0.003
+base_position_size_usdc: 11.0
+capital_cap_usdc: 50.0
+capital_reserve_usdc: 0.0
+dominant_regime_multiplier:
+  breakout: 1.0
+  momentum: 1.0
+  neutral: 0.8
+  pullback: 0.9
+  range: 0.8
+  reversal: 0.85
+  squeeze_sniper: 1.0
+  trend: 1.2
+  trend_rider: 1.0
+max_open_positions: 4
+max_positions_per_strategy: 2
+max_stake_pct_of_free_usdc: 0.55
+max_vol_ratio:
+  breakout: 3.0
+  momentum: 5.0
+  pullback: 3.0
+  range: 1.2
+  reversal: 2.5
+  rsi_cross: 4.0
+  squeeze_sniper: 6.0
+  trend: 2.5
+  trend_rider: 6.0
+min_order_usdc: 6.0
+min_vol_ratio:
+  breakout: 0.2
+  momentum: 0.5
+  pullback: 0.6
+  range: 0.5
+  reversal: 0.5
+  rsi_cross: 0.5
+  squeeze_sniper: 0.5
+  trend: 0.5
+  trend_rider: 0.5
+rsi_bounds:
+  breakout:
+  - 50
+  - 75
+  momentum:
+  - 55
+  - 78
+  pullback:
+  - 40
+  - 60
+  range:
+  - 30
+  - 45
+  reversal:
+  - 20
+  - 38
+  squeeze_sniper:
+  - 30
+  - 80
+  trend:
+  - 45
+  - 72
+  trend_rider:
+  - 30
+  - 80
+strategy_multiplier:
+  breakout: 1.1
+  momentum: 1.0
+  pullback: 0.9
+  range: 0.8
+  reversal: 0.85
+  rsi_cross: 0.9
+  squeeze_sniper: 1.0
+  trend: 1.0
+  trend_rider: 0.3

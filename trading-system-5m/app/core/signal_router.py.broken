@@ -1,0 +1,587 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from datetime import datetime, timezone
+
+import pandas as pd
+import yaml
+
+
+def _log(msg: str) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{now}] {msg}")
+
+
+def _btc_corr(pair, candles_dir, n=50):
+    try:
+        import numpy as np
+        from pathlib import Path
+        btc = Path(candles_dir)/"BTC_USDC_5m.csv"
+        coin = Path(candles_dir)/(pair.replace("/","_")+"_5m.csv")
+        if not btc.exists() or not coin.exists(): return 0.0
+        b = pd.read_csv(btc,usecols=["close"]).tail(n+1)["close"].pct_change().dropna()
+        c = pd.read_csv(coin,usecols=["close"]).tail(n+1)["close"].pct_change().dropna()
+        n2 = min(len(b),len(c))
+        if n2 < 10: return 0.0
+        v = float(np.corrcoef(b.values[-n2:],c.values[-n2:])[0,1])
+        return 0.0 if v!=v else v
+    except: return 0.0
+
+class SignalRouter:
+    def __init__(self, candles_dir: str = "data/candles", state_dir: str = "data/state"):
+        self.candles_dir = Path(candles_dir)
+        self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
+        self.allowed_by_market = {
+            "trend":    {"trend", "breakout", "pullback", "momentum", "trend_rider", "squeeze_sniper", "rsi_cross"},
+            "breakout": {"breakout", "momentum", "trend", "trend_rider", "squeeze_sniper", "rsi_cross"},
+            "pullback": {"pullback", "trend", "reversal", "trend_rider", "squeeze_sniper"},
+            "range":    {"range", "reversal", "pullback", "trend_rider", "squeeze_sniper"},
+            "momentum": {"momentum", "breakout", "trend", "trend_rider", "squeeze_sniper", "rsi_cross"},
+            "reversal": {"reversal", "range", "pullback", "trend_rider", "squeeze_sniper"},
+            "neutral":  {"trend", "breakout", "pullback", "range", "momentum", "reversal", "trend_rider", "squeeze_sniper", "rsi_cross"},
+        }
+
+        settings_path = Path("config/settings.yaml")
+        if settings_path.exists():
+            cfg = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+            self.enabled_strategies = set(cfg.get("enabled_strategies", [
+                "trend", "breakout", "pullback", "range", "momentum", "reversal", "rsi_cross"
+            ]))
+        else:
+            self.enabled_strategies = {"trend", "breakout", "pullback", "range", "momentum", "reversal", "rsi_cross"}
+        self.strategy_order = [
+            "trend_rider",
+            "squeeze_sniper",
+            "breakout",
+            "rsi_cross",
+            "momentum",
+            "trend",
+            "pullback",
+            "reversal",
+            "range",
+        ]
+
+    def _pair_to_feature_filename(self, pair: str) -> str:
+        return pair.replace("/", "_") + "_5m_features.csv"
+
+    def _market_state_path(self) -> Path:
+        return self.state_dir / "market_regime.json"
+
+    def _routing_path(self) -> Path:
+        return self.state_dir / "routing.json"
+
+    def load_market_state(self) -> dict:
+        path = self._market_state_path()
+        if not path.exists():
+            raise FileNotFoundError(f"Market-State fehlt: {path}")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def load_last_features(self, pair: str) -> dict:
+        path = self.candles_dir / self._pair_to_feature_filename(pair)
+        if not path.exists():
+            raise FileNotFoundError(f"Feature-Datei fehlt: {path}")
+
+        df = pd.read_csv(path)
+        last = df.iloc[-2]  # letzte abgeschlossene Kerze
+
+        # Stale-Guard Basisdaten:
+        # Binance/CCXT schreibt timestamp in Millisekunden.
+        # pd.to_datetime(raw) ohne unit liest sonst Nanosekunden und landet bei 1970.
+        from datetime import datetime, timezone
+
+        _feature_ts = pd.NaT
+        _feature_ts_iso = ""
+        _feature_age_min = 999999.0
+        _feature_stale = True
+
+        try:
+            _raw_ts = last.get("timestamp", None)
+            _raw_dt = last.get("datetime", None)
+
+            _num = pd.to_numeric(pd.Series([_raw_ts]), errors="coerce").iloc[0]
+            if pd.notna(_num):
+                _num_f = float(_num)
+
+                if _num_f > 1e17:
+                    _unit = "ns"
+                elif _num_f > 1e14:
+                    _unit = "us"
+                elif _num_f > 1e11:
+                    _unit = "ms"
+                else:
+                    _unit = "s"
+
+                _feature_ts = pd.to_datetime(_num_f, unit=_unit, utc=True, errors="coerce")
+
+            if pd.isna(_feature_ts) and _raw_dt is not None:
+                _feature_ts = pd.to_datetime(_raw_dt, utc=True, errors="coerce")
+
+            if not pd.isna(_feature_ts):
+                _now = datetime.now(timezone.utc)
+                _feature_age_min = round((_now - _feature_ts.to_pydatetime()).total_seconds() / 60.0, 1)
+                _feature_ts_iso = str(_feature_ts)
+                _feature_stale = _feature_age_min > 25.0
+
+        except Exception:
+            _feature_ts_iso = ""
+            _feature_age_min = 999999.0
+            _feature_stale = True
+
+                if bool(last.get("signal_rsi_cross", False)):
+            _log(f"TEMPDIAG_signal_rsi_cross_raw pair={pair} row_ts={_feature_ts_iso} age_min={_feature_age_min:.1f}")
+return {
+            "signal_trend": bool(last.get("signal_trend", False)),
+            "trend_vwap_near": bool(last.get("trend_vwap_near", False)),
+            "trend_vol_080": bool(last.get("trend_vol_080", False)),
+            "trend_continuation": bool(last.get("trend_continuation", False)),
+            "trend_setup_score": int(float(last.get("trend_setup_score", 0) or 0)),
+            "signal_breakout": bool(last.get("signal_breakout", False)),
+            "signal_pullback": bool(last.get("signal_pullback", False)),
+            "signal_range": bool(last.get("signal_range", False)),
+            "signal_momentum": bool(last.get("signal_momentum", False)),
+            "signal_reversal": bool(last.get("signal_reversal", False)),
+            "rsi_14": float(last.get("rsi_14", 0.0) or 0.0),
+            "vol_ratio": float(last.get("vol_ratio", 0.0) or 0.0),
+            "close": float(last.get("close", 0.0) or 0.0),
+            "stronger_than_btc": bool(last.get("stronger_than_btc", True)),
+            "swept_and_reclaimed": bool(last.get("swept_and_reclaimed", False)),
+            "dif": float(last.get("dif", 999.0) or 999.0),
+            "rel_strength_3": float(last.get("rel_strength_3", 0.0) or 0.0),
+            "adx": float(last.get("adx", 0.0) or 0.0),
+            "adx_trend": bool(last.get("adx_trend", False)),
+            "adx_range": bool(last.get("adx_range", False)),
+            "adx_rising": bool(last.get("adx_rising", False)),
+            "adx_squeeze_breakout": bool(last.get("adx_squeeze_breakout", False)),
+            "signal_squeeze_sniper": bool(last.get("signal_squeeze_sniper", False)),
+            "signal_trend_rider": bool(last.get("signal_trend_rider", False)),
+            "bb_percent": float(last.get("bb_percent", 0.5) or 0.5),
+            "bb_upper": float(last.get("bb_upper", 0.0) or 0.0),
+            "bb_lower": float(last.get("bb_lower", 0.0) or 0.0),
+            "range_bottom_hit": bool(last.get("range_bottom_hit", False)),
+            "range_top_hit": bool(last.get("range_top_hit", False)),
+            "vpin": float(last.get("vpin", 0.0) or 0.0),
+            "vpin_toxic": bool(last.get("vpin_toxic", False)),
+            "vpin_rising": bool(last.get("vpin_rising", False)),
+            "ofi": float(last.get("ofi", 0.0) or 0.0),
+            "ofi_bullish": bool(last.get("ofi_bullish", False)),
+            "ofi_bearish": bool(last.get("ofi_bearish", False)),
+            # Fix 20.06.2026: 5 Felder fehlten in dieser Hand-Liste komplett -
+            # jeder feat.get(...)-Zugriff in route_pair() griff IMMER den
+            # Default. vp_poc_dist=0.0 machte das Volume-Profile-Gate (April-
+            # Krisen-Schutz, Memory #21) seit jeher wirkungslos (0.0 nie > 3.0).
+            "atr_pct":     float(last.get("atr_pct", 0.0) or 0.0),
+            "dea":         float(last.get("dea", 0.0) or 0.0),
+            "above_vwap":  bool(last.get("above_vwap", False)),
+            "l3_context":  bool(last.get("l3_context", False)),
+            "vp_poc_dist": float(last.get("vp_poc_dist", 0.0) or 0.0),
+            "signal_rsi_cross": bool(last.get("signal_rsi_cross", False)),
+
+            # Momentum 5m-Setup Diagnosefelder fuer Router-Gates
+            "momentum_entry_score": int(last.get("momentum_entry_score", last.get("momentum_monitor_score", 0)) or 0),
+            "momentum_monitor_score": int(last.get("momentum_monitor_score", 0) or 0),
+            "momentum_mandatory_ok": bool(last.get("momentum_mandatory_ok", False)),
+            "momentum_not_chasing": bool(last.get("momentum_not_chasing", False)),
+
+            # Stale-Guard Diagnose
+            "feature_ts": _feature_ts_iso,
+            "feature_age_min": float(_feature_age_min),
+            "feature_stale": bool(_feature_stale),
+        }
+
+    def extract_candidates(self, feat: dict) -> list[str]:
+        candidates = []
+        if feat.get("signal_trend_rider", False):
+            candidates.append("trend_rider")
+        if feat.get("signal_squeeze_sniper", False):
+            candidates.append("squeeze_sniper")
+        if feat.get("signal_rsi_cross", False):
+            candidates.append("rsi_cross")
+        if feat["signal_breakout"]:
+            candidates.append("breakout")
+        if feat["signal_momentum"]:
+            candidates.append("momentum")
+        if feat["signal_trend"]:
+            candidates.append("trend")
+        if feat["signal_pullback"]:
+            candidates.append("pullback")
+        if feat["signal_reversal"]:
+            candidates.append("reversal")
+        if feat["signal_range"]:
+            candidates.append("range")
+        candidates = [c for c in candidates if c in self.enabled_strategies]
+        return candidates
+
+    def route_pair(self, pair: str, pair_regime: str, dominant_regime: str, htf: dict = None) -> dict:
+        feat = self.load_last_features(pair)
+        candidates = self.extract_candidates(feat)
+        raw_candidates = list(candidates)  # Debug: Signale direkt aus FeatureEngine vor Gates
+
+        # Sicherheits-Gate: niemals mit alten/toten Kerzendaten routen.
+        # Wichtig: raw_candidates bleibt erhalten, damit router_diag sichtbar zeigt,
+        # dass ein Signal da war, aber wegen stale Daten blockiert wurde.
+        if bool(feat.get("feature_stale", False)):
+            if raw_candidates:
+                _log(
+                    f"stale_gate pair={pair} age_min={feat.get('feature_age_min', 999999.0):.1f} "
+                    f"ts={feat.get('feature_ts', '')} raw={raw_candidates}"
+                )
+            candidates = []
+
+        allowed = self.allowed_by_market.get(dominant_regime, set())
+        stronger = feat.get('stronger_than_btc', False)
+        btc_corr        = _btc_corr(pair, str(self.candles_dir))
+        is_decorr       = btc_corr < 0.30
+        is_counter      = btc_corr < -0.10
+        if btc_corr != 0.0:
+            _log(f"btc_corr pair={pair} corr={btc_corr:+.2f} decorr={is_decorr} counter={is_counter}")
+
+        # ── HTF Gate — blockiert Trades gegen Higher Timeframe Bias ──
+        if htf and htf.get("htf_valid", False):
+            htf_bullish  = htf.get("htf_bullish", True)
+            htf_bearish  = htf.get("htf_bearish", False)
+            htf_trending = htf.get("htf_trending", False)
+            htf_ranging  = htf.get("htf_ranging", True)
+            htf_15m      = htf.get("htf_15m_bullish", True)
+
+            filtered = []
+            for c in candidates:
+                # Decorrelierte Coins: HTF-BTC-Gate ignorieren
+                if is_decorr and c in {"trend","breakout","momentum","trend_rider","rsi_cross"}:
+                    filtered.append(c); continue
+                # Gegenläufige Coins: bei BTC bearish trotzdem Range/Reversal/Pullback
+                if is_counter and htf_bearish and c in {"reversal","range","pullback"}:
+                    filtered.append(c); continue
+                # Trend/Breakout/Trend_Rider streng; Momentum bekommt Hunter-Ausnahme
+                if c in {"trend", "breakout", "momentum", "trend_rider", "rsi_cross"} and not htf_bullish:
+                    _ofi_bearish_now = bool(feat.get("ofi_bearish", False))
+                    _poc_dist_now = float(feat.get("vp_poc_dist", 0.0) or 0.0)
+                    _mom_score_now = int(feat.get("momentum_entry_score", feat.get("momentum_monitor_score", 0)) or 0)
+                    _mom_not_chasing_now = bool(feat.get("momentum_not_chasing", False))
+
+                    if (
+                        c == "momentum" and stronger and
+                        not _ofi_bearish_now and
+                        _poc_dist_now <= 6.0 and
+                        _mom_score_now >= 7 and
+                        _mom_not_chasing_now
+                    ):
+                        _log(f"htf_gate_momentum_hunter_override pair={pair} poc_dist={_poc_dist_now:+.1f}% score={_mom_score_now}")
+                        filtered.append(c)
+                        continue
+
+                    _log(f"htf_gate_block pair={pair} strategy={c} reason=htf_bearish")
+                    continue
+                # Fix 25.06.2026: momentum zusaetzlich blocken wenn 1h bullish
+                # ist, aber 15m widerspricht - 3x unabhaengig validiert (n=12/23/25),
+                # konsistent ~14pp WR-Differenz (Widerspruch ~24-26% vs bestaetigt ~38-40%).
+                if c == "momentum" and htf_bullish and not htf_15m:
+                    _log(f"htf_gate_block pair={pair} strategy={c} reason=htf_15m_disagree")
+                    continue
+                # Trend: frueher Trendaufbau darf bei H1-ADX ab 15 laufen.
+                # Breakout/Trend_Rider bleiben bei H1-ADX >= 20.
+                _htf_adx = float(htf.get("htf_1h_adx", 0) or 0)
+                if c == "trend" and _htf_adx < 15:
+                    _log(f"htf_gate_block pair={pair} strategy={c} reason=htf_adx_early_weak_{_htf_adx:.1f}")
+                    continue
+                if c in {"breakout", "trend_rider"} and _htf_adx < 20:
+                    _log(f"htf_gate_block pair={pair} strategy={c} reason=htf_adx_weak_{_htf_adx:.1f}")
+                    continue
+                # Squeeze nur wenn 1h trending
+                if c == "squeeze_sniper" and not htf_trending:
+                    _log(f"htf_gate_block pair={pair} strategy={c} reason=htf_not_trending")
+                    continue
+                # Range nur wenn 1h ranging
+                if c == "range" and htf_trending and not htf_ranging:
+                    _log(f"htf_gate_block pair={pair} strategy={c} reason=htf_trending_no_range")
+                    continue
+                # Reversal nur wenn 1h nicht stark trending aufwärts
+                if c == "reversal" and htf_bullish and htf_trending:
+                    _log(f"htf_gate_block pair={pair} strategy={c} reason=htf_too_strong")
+                    continue
+                filtered.append(c)
+            candidates = filtered
+        # OFI Gate — bewiesene Schwelle ±0.10 aus 291 Coin Analyse
+        try:
+            _ofi_bearish = bool(feat.get("ofi_bearish", False))
+            if _ofi_bearish:
+                filtered_ofi = []
+                for c in candidates:
+                    # Datencheck 01.07.2026:
+                    # Nach Momentum-Core-Patch ist Momentum deutlich enger.
+                    # original + ma7_turn_recent + direction_recent + ofi:
+                    # n=37, avg30=+0.0781%, med30=+0.0474%, up30=51.35%.
+                    # Deshalb ofi_bearish nicht mehr pauschal als Momentum-Blocker nutzen.
+                    # Bei Momentum kann es Absorption bedeuten.
+                    if c in {"trend", "breakout", "trend_rider", "rsi_cross"}:
+                        _log(f"ofi_gate pair={pair} strategy={c} ofi={feat.get('ofi', 0.0):+.3f}")
+                        continue
+                    if c == "momentum":
+                        _log(f"ofi_gate_momentum_allowed pair={pair} ofi={feat.get('ofi', 0.0):+.3f} reason=core_momentum_absorption_possible")
+                    filtered_ofi.append(c)
+                candidates = filtered_ofi
+        except Exception:
+            pass
+
+        # Volume Profile Gate — Schutz gegen Spaet-Einstiege.
+        # Ausnahme: Momentum ist ab jetzt nur ein 5m-Setup; echter Entry wird danach auf 1m bestaetigt.
+        # Deshalb darf ein starkes frisches Momentum-Setup bei leichter POC-Distanz bis 6% weiter,
+        # aber extreme Chases wie SYN +20%/+30% bleiben blockiert.
+        try:
+            _poc_dist = float(feat.get("vp_poc_dist", 0.0) or 0.0)
+            filtered_vp = []
+
+            for c in candidates:
+                if c == "momentum" and _poc_dist > 3.0:
+                    _mom_score = int(feat.get("momentum_entry_score", feat.get("momentum_monitor_score", 0)) or 0)
+                    _mom_mandatory = bool(feat.get("momentum_mandatory_ok", False))
+                    _mom_not_chasing = bool(feat.get("momentum_not_chasing", False))
+                    _rsi = float(feat.get("rsi_14", 0.0) or 0.0)
+                    _bb = float(feat.get("bb_percent", 0.0) or 0.0)
+
+                    if (
+                        _mom_score >= 8 and
+                        _mom_mandatory and
+                        _mom_not_chasing and
+                        _poc_dist <= 6.0 and
+                        _rsi < 70.0 and
+                        _bb < 1.05
+                    ):
+                        _log(
+                            f"vp_gate_momentum_setup_override pair={pair} "
+                            f"poc_dist={_poc_dist:+.1f}% score={_mom_score} "
+                            f"rsi={_rsi:.1f} bb={_bb:.2f}"
+                        )
+                        filtered_vp.append(c)
+                        continue
+
+                    _log(
+                        f"vp_gate pair={pair} strategy={c} poc_dist={_poc_dist:+.1f}% "
+                        f"score={_mom_score} mandatory={_mom_mandatory} not_chasing={_mom_not_chasing}"
+                    )
+                    continue
+
+                if c in {"trend", "breakout", "trend_rider", "rsi_cross"} and _poc_dist > 3.0:
+                    _log(f"vp_gate pair={pair} strategy={c} poc_dist={_poc_dist:+.1f}%")
+                    continue
+
+                filtered_vp.append(c)
+
+            candidates = filtered_vp
+        except Exception as _e:
+            _log(f"vp_gate_error pair={pair} reason={_e}")
+
+        # HMM Regime Gate — blockiert Strategien gegen Makro-Regime
+        # HMM Gate — nur crash/distribution blockt, accumulation/trend frei
+        try:
+            import json as _j
+            from pathlib import Path as _pp
+            _hf = _pp("data/state/hmm_regime.json")
+            if _hf.exists():
+                _hd = _j.loads(_hf.read_text())
+                _hr = _hd.get("regime","neutral")
+                _hc = _hd.get("confidence",0)
+                _gt = float(_hd.get("gate_threshold_hard", 0.80))
+                if _hr in {"crash","distribution"} and _hc > _gt:
+                    from app.core.hmm_regime import get_allowed_strategies
+                    _al = get_allowed_strategies(_hr, _hc)
+                    _before = len(candidates)
+                    candidates = [c for c in candidates if c in _al or is_decorr or is_counter]
+                    if len(candidates) < _before:
+                        _log(f"hmm_gate pair={pair} regime={_hr} conf={_hc:.0%} blocked={_before-len(candidates)}")
+        except Exception:
+            pass
+
+        # ADX-basiertes dynamisches Routing
+        adx_trend = feat.get('adx_trend', False)
+        adx_range = feat.get('adx_range', False)
+        bb_percent = feat.get('bb_percent', 0.5)
+        # Nicht am Top einer Range kaufen
+        adx_squeeze = feat.get('adx_squeeze_breakout', False)
+        # Fix 22.06.2026: momentum war in BEIDEN adx_range-Zweigen nie erlaubt,
+        # obwohl signal_momentum bewusst fuer 'ADX wacht auf' gebaut ist (siehe
+        # feature_engine.py Kommentar). 60% aller momentum-Signale (692 gesamt,
+        # 415 betroffen) wurden dadurch stillschweigend blockiert, kein Log.
+        # Gezielte Ausnahme: nur wenn adx_rising=True (ADX steigt bereits),
+        # nicht pauschal - haelt die schuetzende ADX-Logik fuer echte Range-
+        # Phasen ohne Aufwaerts-Tendenz intakt.
+        adx_rising = feat.get('adx_rising', False)
+        if adx_trend:
+            adx_allowed = {'momentum', 'breakout', 'trend', 'reversal', 'trend_rider', 'squeeze_sniper', 'rsi_cross'}
+        elif adx_range and bb_percent > 0.8:
+            adx_allowed = {'reversal', 'trend_rider'}
+            if adx_rising and feat.get("signal_trend", False) and int(feat.get("trend_setup_score", 0) or 0) >= 9:
+                adx_allowed = adx_allowed | {'trend'}
+                if 'trend' in candidates:
+                    _log(f"trend_adx_wakeup_exception pair={pair} branch=range_bb_high adx={feat.get('adx',0):.1f} score={feat.get('trend_setup_score',0)}")
+            if adx_rising:
+                adx_allowed = adx_allowed | {'momentum'}
+                if 'momentum' in candidates:
+                    _log(f"adx_rising_exception pair={pair} branch=range_bb_high adx={feat.get('adx',0):.1f}")
+        elif adx_range:
+            adx_allowed = {'range', 'reversal', 'pullback', 'trend_rider'}
+            if adx_rising and feat.get("signal_trend", False) and int(feat.get("trend_setup_score", 0) or 0) >= 9:
+                adx_allowed = adx_allowed | {'trend'}
+                if 'trend' in candidates:
+                    _log(f"trend_adx_wakeup_exception pair={pair} branch=range_normal adx={feat.get('adx',0):.1f} score={feat.get('trend_setup_score',0)}")
+            if adx_rising:
+                adx_allowed = adx_allowed | {'momentum'}
+                if 'momentum' in candidates:
+                    _log(f"adx_rising_exception pair={pair} branch=range_normal adx={feat.get('adx',0):.1f}")
+        else:
+            adx_allowed = self.enabled_strategies
+        if adx_squeeze:
+            adx_allowed = self.enabled_strategies
+
+        # Pullback-ADX-Exception:
+        # Datencheck 29.06.2026:
+        # Heute wurden 5 echte raw Pullbacks nur durch pullback:adx_gate blockiert.
+        # Hypothetische Simulation: 5 Setups, +2.356%, 80% WR.
+        # Der einzige Verlierer lag bei ADX 32.6.
+        # Deshalb Pullback nur gezielt erlauben, nicht pauschal:
+        # - Signal muss wirklich pullback sein
+        # - Coin muss relativ stark sein
+        # - ADX darf nicht zu heiß sein
+        # - BB darf nicht extrem überdehnt sein
+        try:
+            _adx_pb = float(feat.get("adx", 0.0) or 0.0)
+            _bb_pb = float(bb_percent or 0.0)
+            if (
+                "pullback" in candidates and
+                "pullback" not in adx_allowed and
+                bool(feat.get("signal_pullback", False)) and
+                stronger and
+                _adx_pb <= 30.0 and
+                _bb_pb <= 1.10
+            ):
+                adx_allowed = set(adx_allowed) | {"pullback"}
+                _log(
+                    f"pullback_adx_exception pair={pair} "
+                    f"adx={_adx_pb:.1f} bb={_bb_pb:.2f} "
+                    f"vp={feat.get('vp_poc_dist',0.0):+.1f}% "
+                    f"ofi={feat.get('ofi',0.0):+.3f}"
+                )
+        except Exception as _e:
+            _log(f"pullback_adx_exception_failed pair={pair} reason={_e}")
+
+        selected = None
+        for name in self.strategy_order:
+            if name not in candidates:
+                continue
+            if (name in allowed or stronger) and name in adx_allowed:
+                selected = name
+                break
+
+        blocked_final = []
+        for _c in list(candidates):
+            _reasons = []
+            if not (_c in allowed or stronger):
+                _reasons.append("market_gate")
+            if _c not in adx_allowed:
+                _reasons.append("adx_gate")
+            if _reasons:
+                blocked_final.append(_c + ":" + "+".join(_reasons))
+
+        if raw_candidates or blocked_final:
+            _log(
+                f"router_diag pair={pair} raw={raw_candidates} after_gates={candidates} "
+                f"selected={selected} blocked_final={blocked_final} "
+                f"age={feat.get('feature_age_min', 0.0):.1f}m stale={feat.get('feature_stale', False)} "
+                f"vp={feat.get('vp_poc_dist',0.0):+.1f}% "
+                f"ofi={feat.get('ofi',0.0):+.3f} "
+                f"bb={bb_percent:.2f} adx={feat.get('adx',0.0):.1f} "
+                f"adx_allowed={sorted(adx_allowed)} stronger={stronger}"
+            )
+
+        result = {
+            "pair": pair,
+            "pair_regime": pair_regime,
+            "dominant_regime": dominant_regime,
+            "raw_candidates": raw_candidates,
+            "candidates": candidates,
+            "selected_strategy": selected,
+            "blocked_final": blocked_final,
+            "close": feat["close"],
+            "rsi_14": feat["rsi_14"],
+            "vol_ratio": feat["vol_ratio"],
+            "stronger_than_btc": feat.get("stronger_than_btc", False),
+            "swept_and_reclaimed": feat.get("swept_and_reclaimed", False),
+            "dif": feat.get("dif", 0.0),
+            "rel_strength_3": feat.get("rel_strength_3", 0.0),
+            "vpin": feat.get("vpin", 0.0),
+            "ofi":         feat.get("ofi", 0.0),
+            "adx":         feat.get("adx", 0.0),
+            "dea":         feat.get("dea", 0.0),
+            "bb_percent":  feat.get("bb_percent", 0.0),
+            "above_vwap":  feat.get("above_vwap", False),
+            "atr_pct":     feat.get("atr_pct", 0.0),
+            "adx_trend":   feat.get("adx_trend", False),
+            "adx_range":   feat.get("adx_range", False),
+            "l3_context":  feat.get("l3_context", False),
+            "btc_corr":    btc_corr,
+            "vp_poc_dist": feat.get("vp_poc_dist", 0.0),
+        }
+
+        _log(
+            f"router pair={pair} pair_regime={pair_regime} "
+            f"dominant={dominant_regime} candidates={candidates} "
+            f"selected={selected}"
+        )
+        # entry_hmm Fix 18.06.2026: _hmm_regime/_hmm_conf wurden nie gesetzt
+        # ALT (totes Feld): HMM-try-Block nutzt _hr/_hc, nicht _hmm_regime/_hmm_conf
+        # result["hmm_regime"] = _hmm_regime if "_hmm_regime" in dir() else ""
+        # result["hmm_conf"]   = _hmm_conf   if "_hmm_conf"   in dir() else 0.0
+        result["hmm_regime"] = _hr if "_hr" in dir() else ""
+        result["hmm_conf"]   = float(_hc) if "_hc" in dir() else 0.0
+        # Candle-Anzahl mitsenden — risk_manager prueft Minimum
+        try:
+            _feat_path = self.candles_dir / self._pair_to_feature_filename(pair)
+            import pandas as _pd
+            result["candle_rows"] = len(_pd.read_csv(_feat_path)) if _feat_path.exists() else 0
+        except:
+            result["candle_rows"] = 0
+        return result
+
+    def build_routes(self, htf_map: dict = None, blocked_pairs: set = None) -> dict:
+        # Health-Check-Integration 01.07.2026: Pairs mit ungueltigem/veraltetem
+        # Datenzustand werden vom Routing uebersprungen, kein Trade moeglich.
+        # Vorher: _data_health_check() lief nur als stiller Log, kein Effekt.
+        _bp = blocked_pairs or set()
+        market = self.load_market_state()
+        dominant_regime = market["dominant_regime"]
+        pair_items = market["pairs"]
+        routes = []
+        for item in pair_items:
+            pair = item["pair"]
+            if pair in _bp:
+                _log(f"routing_skipped pair={pair} reason=data_health_blocked")
+                continue
+            htf = htf_map.get(pair, {}) if htf_map else {}
+            routes.append(
+                self.route_pair(
+                    pair=pair,
+                    pair_regime=item["regime"],
+                    dominant_regime=dominant_regime,
+                    htf=htf,
+                )
+            )
+
+        summary = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "dominant_regime": dominant_regime,
+            "routes": routes,
+            "active_routes": [r for r in routes if r["selected_strategy"] is not None],
+        }
+
+        self._routing_path().write_text(
+            json.dumps(summary, indent=2),
+            encoding="utf-8",
+        )
+
+        _log(
+            f"routing_summary dominant={dominant_regime} "
+            f"active={len(summary['active_routes'])} total={len(routes)}"
+        )
+        return summary

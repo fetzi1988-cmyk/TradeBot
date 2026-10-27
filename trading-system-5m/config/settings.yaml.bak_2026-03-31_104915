@@ -1,0 +1,7 @@
+app_name: trading-system
+mode: dry_run
+exchange: binance
+timeframe: 5m
+loop_seconds: 15
+max_open_trades: 6
+quote_currency: USDC

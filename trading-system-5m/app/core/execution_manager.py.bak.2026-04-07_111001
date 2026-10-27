@@ -1,0 +1,354 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+
+import yaml
+import ccxt
+from dotenv import load_dotenv
+
+from app.core.broker_guard import BrokerGuard
+from app.core.telegram_notifier import TelegramNotifier
+from app.core.control_state import ControlState
+from app.core.trade_logger import log_open
+
+
+def _log(msg: str) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{now}] {msg}")
+
+
+class ExecutionManager:
+    def __init__(
+        self,
+        risk_path: str = "data/state/risk_approved.json",
+        routing_path: str = "data/state/routing.json",
+        open_trades_path: str = "data/state/open_trades.json",
+        risk_cfg_path: str = "config/risk.yaml",
+        env_path: str = ".env",
+    ):
+        self.risk_path = Path(risk_path)
+        self.routing_path = Path(routing_path)
+        self.open_trades_path = Path(open_trades_path)
+        self.risk_cfg_path = Path(risk_cfg_path)
+        self.env_path = Path(env_path)
+
+        self.open_trades_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.risk_cfg = self._load_yaml(self.risk_cfg_path)
+
+        load_dotenv(self.env_path)
+        self.live_trading_enabled = os.getenv("LIVE_TRADING_ENABLED", "false").strip().lower() == "true"
+
+        self.api_key = os.getenv("BINANCE_API_KEY", "").strip()
+        self.api_secret = os.getenv("BINANCE_API_SECRET", "").strip()
+        self.private_api_ready = bool(self.api_key and self.api_secret)
+        self.exchange = None
+
+        if self.private_api_ready:
+            self.exchange = ccxt.binance({
+                "apiKey": self.api_key,
+                "secret": self.api_secret,
+                "enableRateLimit": True,
+            })
+
+        self.broker_guard = BrokerGuard()
+        self.telegram = TelegramNotifier()
+        self.control_state = ControlState()
+
+    def _load_json(self, path: Path, default):
+        if not path.exists():
+            return default
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _save_json(self, path: Path, payload: dict) -> None:
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _load_yaml(self, path: Path) -> dict:
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+
+    def _next_trade_id(self, open_trades: list, closed_trades: list) -> int:
+        ids = []
+        for t in open_trades:
+            ids.append(int(t.get("trade_id", 0) or 0))
+        for t in closed_trades:
+            ids.append(int(t.get("trade_id", 0) or 0))
+        return (max(ids) + 1) if ids else 1
+
+    def _get_free_usdc(self) -> float:
+        capital_cap = float(self.risk_cfg.get("capital_cap_usdc", 50.0) or 50.0)
+        mode = str(self.cfg.get("mode", "dry_run")).lower()
+        if mode != "live":
+            return capital_cap
+        if not self.private_api_ready or self.exchange is None:
+            return capital_cap
+        try:
+            balance = self.exchange.fetch_balance()
+            return float(balance.get("USDC", {}).get("free", 0.0) or 0.0)
+        except Exception as e:
+            _log(f"execution balance_fetch_failed using_capital_cap error={e}")
+            return capital_cap
+
+    def _compute_final_stake(self, proposed_stake: float, free_usdc: float) -> tuple[float, str | None]:
+        capital_cap = float(self.risk_cfg.get("capital_cap_usdc", 50.0) or 50.0)
+        capital_reserve = float(self.risk_cfg.get("capital_reserve_usdc", 10.0) or 10.0)
+        min_order = float(self.risk_cfg.get("min_order_usdc", 10.5) or 10.5)
+        max_stake_pct = float(self.risk_cfg.get("max_stake_pct_of_free_usdc", 0.40) or 0.40)
+
+        capped_free = min(free_usdc, capital_cap)
+        usable_after_reserve = max(0.0, capped_free - capital_reserve)
+        stake_cap_by_free = free_usdc * max_stake_pct
+        final_stake = min(proposed_stake, usable_after_reserve, stake_cap_by_free)
+
+        final_stake = round(final_stake, 2)
+
+        if usable_after_reserve < min_order:
+            return 0.0, "reserve_blocks_trade"
+
+        if final_stake < min_order:
+            return 0.0, "stake_below_min_order"
+
+        return final_stake, None
+
+    def run(self) -> dict:
+        risk = self._load_json(
+            self.risk_path,
+            {
+                "approved": [],
+                "rejected": [],
+                "dominant_regime": "neutral",
+            },
+        )
+
+        routing = self._load_json(
+            self.routing_path,
+            {
+                "routes": [],
+                "dominant_regime": "neutral",
+            },
+        )
+
+        state = self._load_json(
+            self.open_trades_path,
+            {
+                "open_trades": [],
+                "closed_trades": [],
+                "closed_count_total": 0,
+            },
+        )
+
+        max_open_positions = int(self.risk_cfg.get("max_open_positions", 2) or 2)
+        max_positions_per_strategy = int(self.risk_cfg.get("max_positions_per_strategy", 1) or 1)
+
+        open_trades = [t for t in state.get("open_trades", []) if t.get("status") == "open"]
+        closed_trades = list(state.get("closed_trades", []))
+        closed_count_total = int(state.get("closed_count_total", len(closed_trades)) or 0)
+
+        paused = self.control_state.is_paused()
+
+        if paused:
+            out = {
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "live_trading_enabled": self.live_trading_enabled,
+                "private_api_ready": self.private_api_ready,
+                "execution_mode": "live" if self.live_trading_enabled else "paper",
+                "trading_paused": True,
+                "free_usdc_snapshot": round(self._get_free_usdc(), 2),
+                "open_trades": open_trades,
+                "created": [],
+                "skipped": [],
+                "open_count": len([t for t in open_trades if t.get("status") == "open"]),
+                "closed_trades": closed_trades,
+                "closed_now": list(state.get("closed_now", [])),
+                "closed_count_total": closed_count_total,
+            }
+            self._save_json(self.open_trades_path, out)
+            _log(
+                f"execution_summary mode={out['execution_mode']} private_api_ready={out['private_api_ready']} "
+                f"paused=yes free_usdc={out['free_usdc_snapshot']:.2f} created=0 skipped=0 open_count={out['open_count']}"
+            )
+            return out
+
+        route_map = {r["pair"]: r for r in routing.get("routes", [])}
+
+        created = []
+        skipped = []
+
+        next_id = self._next_trade_id(open_trades, closed_trades)
+
+        already_open_pairs = {
+            t["pair"]
+            for t in open_trades
+            if t.get("status") == "open"
+        }
+
+        strategy_open_counts = {}
+        for t in open_trades:
+            if t.get("status") != "open":
+                continue
+            strat = t.get("strategy", "unknown")
+            strategy_open_counts[strat] = strategy_open_counts.get(strat, 0) + 1
+
+        total_open_now = len([t for t in open_trades if t.get("status") == "open"])
+        free_usdc = self._get_free_usdc()
+
+        for item in risk.get("approved", []):
+            pair = item["pair"]
+            strategy = item["strategy"]
+
+            if pair in already_open_pairs:
+                skipped.append({
+                    "pair": pair,
+                    "strategy": strategy,
+                    "reason": "already_open",
+                })
+                continue
+            # Cooldown nach hard_stop
+            _cooldown_path = self.open_trades_path.parent / 'cooldown.json'
+            _cooldown = {}
+            if _cooldown_path.exists():
+                try:
+                    import json as _json
+                    _cooldown = _json.loads(_cooldown_path.read_text())
+                except Exception:
+                    _cooldown = {}
+            if pair in _cooldown:
+                from datetime import datetime as _dt, timezone as _tz
+                if _dt.now(_tz.utc).isoformat() < _cooldown[pair]:
+                    skipped.append({'pair': pair, 'strategy': strategy, 'reason': 'cooldown_after_hard_stop'})
+                    continue
+                else:
+                    del _cooldown[pair]
+                    _cooldown_path.write_text(_json.dumps(_cooldown))
+
+            if total_open_now >= max_open_positions:
+                skipped.append({
+                    "pair": pair,
+                    "strategy": strategy,
+                    "reason": "max_open_positions_reached",
+                })
+                continue
+
+            current_strategy_count = strategy_open_counts.get(strategy, 0)
+            if current_strategy_count >= max_positions_per_strategy:
+                skipped.append({
+                    "pair": pair,
+                    "strategy": strategy,
+                    "reason": "max_positions_per_strategy_reached",
+                })
+                continue
+
+            proposed_stake = float(item.get("stake_usdc", 0.0) or 0.0)
+            final_stake, block_reason = self._compute_final_stake(proposed_stake, free_usdc)
+
+            if block_reason:
+                skipped.append({
+                    "pair": pair,
+                    "strategy": strategy,
+                    "reason": block_reason,
+                    "free_usdc": round(free_usdc, 2),
+                    "proposed_stake": round(proposed_stake, 2),
+                })
+                continue
+
+            route_info = route_map.get(pair, {})
+            entry_price = float(route_info.get("close", 0.0) or 0.0)
+
+            preview = self.broker_guard.preview_order(pair, final_stake, entry_price)
+            if preview.get("status") != "ok":
+                skipped.append({
+                    "pair": pair,
+                    "strategy": strategy,
+                    "reason": f"broker_guard_{preview.get('reason')}",
+                    "proposed_stake": round(proposed_stake, 2),
+                    "final_stake": round(final_stake, 2),
+                })
+                continue
+
+            trade = {
+                "trade_id": next_id,
+                "pair": pair,
+                "strategy": strategy,
+                "dominant_regime": item.get("dominant_regime", risk.get("dominant_regime", "neutral")),
+                "stake_usdc": final_stake,
+                "proposed_stake_usdc": round(proposed_stake, 2),
+                "free_usdc_at_entry": round(free_usdc, 2),
+                "entry_price": entry_price,
+                "rounded_entry_price": preview.get("rounded_price"),
+                "rounded_amount": preview.get("rounded_amount"),
+                "final_notional": preview.get("final_notional"),
+                "last_price": entry_price,
+                "highest_price": entry_price,
+                "lowest_price": entry_price,
+                "entry_rsi_14": item.get("rsi_14"),
+                "entry_vol_ratio": item.get("vol_ratio"),
+                "entry_dif": item.get("dif", 0.0),
+                "entry_time_utc": datetime.now(timezone.utc).isoformat(),
+                "status": "open",
+                "side": "long",
+                "execution_mode": "live" if self.live_trading_enabled else "paper",
+            }
+
+            open_trades.append(trade)
+            log_open(trade)
+            created.append(trade)
+            already_open_pairs.add(pair)
+
+            strategy_open_counts[strategy] = strategy_open_counts.get(strategy, 0) + 1
+            total_open_now += 1
+            free_usdc = max(0.0, free_usdc - final_stake)
+
+            _log(
+                f"execution mode={'live' if self.live_trading_enabled else 'paper'} "
+                f"pair={pair} strategy={strategy} entry={entry_price:.6f} "
+                f"stake={final_stake:.2f} proposed={proposed_stake:.2f} free_usdc={trade['free_usdc_at_entry']:.2f} status=open"
+            )
+
+            if self.telegram.enabled:
+                try:
+                    self.telegram.send(
+                        f"🟢 OPEN {pair}\n"
+                        f"Strategy: {strategy}\n"
+                        f"Mode: {'LIVE' if self.live_trading_enabled else 'PAPER'}\n"
+                        f"Stake: {final_stake:.2f} USDC\n"
+                        f"Price: {entry_price:.6f}\n"
+                        f"Amount: {preview.get('rounded_amount')}\n"
+                        f"Notional: {float(preview.get('final_notional', 0.0) or 0.0):.2f}"
+                    )
+                except Exception as e:
+                    _log(f"telegram_open_alert_failed pair={pair} error={e}")
+
+            next_id += 1
+
+        out = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "live_trading_enabled": self.live_trading_enabled,
+            "private_api_ready": self.private_api_ready,
+            "execution_mode": "live" if self.live_trading_enabled else "paper",
+            "trading_paused": False,
+            "free_usdc_snapshot": round(self._get_free_usdc(), 2),
+            "open_trades": open_trades,
+            "created": created,
+            "skipped": skipped,
+            "open_count": len([t for t in open_trades if t.get("status") == "open"]),
+            "closed_trades": closed_trades,
+            "closed_now": [],
+            "closed_count_total": closed_count_total,
+        }
+
+        self._save_json(self.open_trades_path, out)
+
+        _log(
+            f"execution_summary mode={out['execution_mode']} private_api_ready={out['private_api_ready']} "
+            f"free_usdc={out['free_usdc_snapshot']:.2f} created={len(created)} skipped={len(skipped)} open_count={out['open_count']}"
+        )
+
+        return out

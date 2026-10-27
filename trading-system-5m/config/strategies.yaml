@@ -1,0 +1,17 @@
+strategies:
+  trend:
+    enabled: true
+  breakout:
+    enabled: true
+  pullback:
+    enabled: true
+  range:
+    enabled: true
+  momentum:
+    enabled: true
+  reversal:
+    enabled: true
+  squeeze_sniper:
+    enabled: true
+  trend_rider:
+    enabled: true

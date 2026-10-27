@@ -1,0 +1,176 @@
+from pathlib import Path
+from datetime import datetime, timezone
+
+import numpy as np
+import pandas as pd
+
+
+def _log(msg: str) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{now}] {msg}")
+
+
+class FeatureEngine:
+    def __init__(self, candles_dir: str = "data/candles"):
+        self.candles_dir = Path(candles_dir)
+
+    def _pair_to_filename(self, pair: str) -> str:
+        return pair.replace("/", "_") + "_5m.csv"
+
+    def _pair_to_feature_filename(self, pair: str) -> str:
+        return pair.replace("/", "_") + "_5m_features.csv"
+
+    def _rsi(self, close: pd.Series, period: int = 14) -> pd.Series:
+        delta = close.diff()
+        gain = delta.clip(lower=0.0)
+        loss = -delta.clip(upper=0.0)
+
+        avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.fillna(50.0)
+
+    def _atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+
+        prev_close = close.shift(1)
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1 / period, adjust=False).mean()
+        return atr.fillna(0.0)
+
+    def build_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+
+        out["ema_20"] = out["close"].ewm(span=20, adjust=False).mean()
+        out["ema_50"] = out["close"].ewm(span=50, adjust=False).mean()
+        out["ema_200"] = out["close"].ewm(span=200, adjust=False).mean()
+        out["ema_9"] = out["close"].ewm(span=9, adjust=False).mean()
+        # VWAP session-based (Reset täglich 00:00 UTC)
+        typical_price = (out["high"] + out["low"] + out["close"]) / 3
+        out["_tp_vol"] = typical_price * out["volume"]
+        if "datetime" in out.columns:
+            out["_date"] = pd.to_datetime(out["datetime"], utc=True).dt.date
+        else:
+            out["_date"] = pd.to_datetime(out["timestamp"], unit="ms", utc=True).dt.date
+        out["_cum_tp_vol"] = out.groupby("_date")["_tp_vol"].cumsum()
+        out["_cum_vol"] = out.groupby("_date")["volume"].cumsum()
+        out["vwap"] = (out["_cum_tp_vol"] / out["_cum_vol"].replace(0, np.nan)).ffill()
+        out.drop(columns=["_tp_vol", "_date", "_cum_tp_vol", "_cum_vol"], inplace=True)
+
+        out["rsi_6"] = self._rsi(out["close"], 6)
+        out["rsi_14"] = self._rsi(out["close"], 14)
+        out["atr_14"] = self._atr(out, 14)
+
+        out["volume_sma_20"] = out["volume"].rolling(20).mean()
+        out["vol_ratio"] = (out["volume"] / out["volume_sma_20"].replace(0, np.nan)).fillna(0.0)
+
+        out["ret_1"] = out["close"].pct_change().fillna(0.0)
+        out["ret_3"] = out["close"].pct_change(3).fillna(0.0)
+        out["ret_12"] = out["close"].pct_change(12).fillna(0.0)
+
+        out["hh_20_prev"] = out["high"].rolling(20).max().shift(1)
+        out["ll_20_prev"] = out["low"].rolling(20).min().shift(1)
+
+        out["trend_up"] = (
+            (out["ema_20"] > out["ema_50"]) &
+            (out["ema_50"] > out["ema_200"])
+        )
+
+        out["trend_down"] = (
+            (out["ema_20"] < out["ema_50"]) &
+            (out["ema_50"] < out["ema_200"])
+        )
+
+        out["breakout_up"] = (
+            (out["close"] > out["hh_20_prev"]) &
+            (out["vol_ratio"] > 1.2)
+        ).fillna(False)
+
+        out["breakout_down"] = (
+            (out["close"] < out["ll_20_prev"]) &
+            (out["vol_ratio"] > 1.2)
+        ).fillna(False)
+
+        out["pullback_long"] = (
+            out["trend_up"] &
+            (out["close"] < out["ema_20"]) &
+            (out["close"] > out["ema_50"]) &
+            (out["rsi_14"] > 40) &
+            (out["rsi_14"] < 60)
+        ).fillna(False)
+
+        out["range_regime"] = (
+            ((out["ema_20"] - out["ema_50"]).abs() / out["close"].replace(0, np.nan) < 0.0035) &
+            (out["atr_14"] / out["close"].replace(0, np.nan) < 0.012)
+        ).fillna(False)
+
+        out["momentum_long"] = (
+            (out["ret_3"] > 0.003) &
+            (out["rsi_14"] > 55) &
+            (out["vol_ratio"] > 1.0)
+        ).fillna(False)
+
+        out["reversal_long"] = (
+            (out["rsi_14"] < 38) &
+            (out["rsi_6"] > out["rsi_14"]) &
+            (out["rsi_6"].shift(1) <= out["rsi_14"].shift(1)) &
+            (out["vol_ratio"] >= 0.70) &
+            (out["close"] > out["low"].rolling(5).min())
+        ).fillna(False)
+
+        out["signal_trend"] = (
+            (out["close"] > out["ema_200"]) &
+            (out["close"] > out["vwap"]) &
+            (out["ema_9"] > out["ema_20"]) &
+            (out["rsi_14"] > 45) &
+            (out["rsi_14"] < 72) &
+            (out["vol_ratio"] > 1.0)
+        ).fillna(False)
+
+        out["signal_breakout"] = out["breakout_up"].fillna(False)
+        out["signal_pullback"] = out["pullback_long"].fillna(False)
+        out["signal_range"] = (
+            out["range_regime"] &
+            (out["rsi_14"] < 40)
+        ).fillna(False)
+        out["signal_momentum"] = out["momentum_long"].fillna(False)
+        out["signal_reversal"] = out["reversal_long"]
+
+        return out
+
+    def process_pair(self, pair: str) -> Path:
+        src = self.candles_dir / self._pair_to_filename(pair)
+        dst = self.candles_dir / self._pair_to_feature_filename(pair)
+
+        if not src.exists():
+            raise FileNotFoundError(f"Candle-Datei fehlt: {src}")
+
+        df = pd.read_csv(src)
+        features = self.build_features(df)
+        features.to_csv(dst, index=False)
+
+        last = features.iloc[-1]
+        _log(
+            f"features pair={pair} rows={len(features)} "
+            f"trend={bool(last.get('signal_trend', False))} "
+            f"breakout={bool(last.get('signal_breakout', False))} "
+            f"pullback={bool(last.get('signal_pullback', False))} "
+            f"range={bool(last.get('signal_range', False))} "
+            f"momentum={bool(last.get('signal_momentum', False))} "
+            f"reversal={bool(last.get('signal_reversal', False))}"
+        )
+        return dst
+
+    def process_many(self, pairs: list[str]) -> list[Path]:
+        out = []
+        for pair in pairs:
+            out.append(self.process_pair(pair))
+        return out

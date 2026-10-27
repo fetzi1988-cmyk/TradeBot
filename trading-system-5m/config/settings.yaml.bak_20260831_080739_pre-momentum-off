@@ -1,0 +1,17 @@
+app_name: trading-system
+mode: dry_run
+exchange: binance
+timeframe: 5m
+max_open_trades: 6
+quote_currency: USDC
+loop_interval_seconds: 15
+enabled_strategies:
+- trend
+- pullback
+- breakout
+- momentum
+- reversal
+- range
+- squeeze_sniper
+- trend_rider
+- rsi_cross

@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+import ccxt
+import yaml
+from pathlib import Path
+from datetime import datetime, timezone
+
+EXCLUDE = {
+    "USD1/USDC", "EUR/USDC", "FDUSD/USDC", "PAXG/USDC", "U/USDC",
+    "USDT/USDC", "AUD/USDC", "2Z/USDC", "GIGGLE/USDC", "ENJ/USDC",
+    "WLFI/USDC", "0G/USDC", "DASH/USDC",
+    "ROBO/USDC", "PENGU/USDC", "WLD/USDC", "BONK/USDC",
+    "USD1/USDC", "EUR/USDC", "FDUSD/USDC", "PAXG/USDC",
+    "U/USDC", "USDT/USDC", "AUD/USDC", "2Z/USDC"
+}
+MIN_VOLUME = 500_000
+MAX_PAIRS = 40
+PAIRS_FILE = Path("/root/trading-system/config/pairs.yaml")
+
+exchange = ccxt.binance()
+exchange.load_markets()
+
+usdc_pairs = [s for s in exchange.markets if s.endswith("/USDC")]
+results = []
+for p in usdc_pairs:
+    try:
+        ticker = exchange.fetch_ticker(p)
+        vol = float(ticker.get("quoteVolume", 0) or 0)
+        if vol >= MIN_VOLUME and p not in EXCLUDE:
+            results.append((p, vol))
+    except:
+        pass
+
+results.sort(key=lambda x: x[1], reverse=True)
+top_pairs = [p for p, v in results[:MAX_PAIRS]]
+
+if "BTC/USDC" not in top_pairs:
+    top_pairs.insert(0, "BTC/USDC")
+
+current = yaml.safe_load(PAIRS_FILE.read_text()) or {}
+old_pairs = current.get("pairs", [])
+current["pairs"] = top_pairs
+PAIRS_FILE.write_text(yaml.safe_dump(current, sort_keys=False, allow_unicode=True))
+
+added = set(top_pairs) - set(old_pairs)
+removed = set(old_pairs) - set(top_pairs)
+print(f"[{datetime.now(timezone.utc)}] Pairs: {len(top_pairs)}")
+if added:
+    print(f"Neu: {', '.join(added)}")
+if removed:
+    print(f"Entfernt: {', '.join(removed)}")
