@@ -172,6 +172,8 @@ def report(trades, C):
 if __name__ == "__main__":
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else "config/config_1h.yaml"
     cfg = load_config(cfg_path)
+    if len(sys.argv) > 2:                      # candles_dir per CLI ueberschreibbar
+        cfg["data"]["candles_dir"] = sys.argv[2]
     C = float(cfg["costs"]["round_trip_pct"])
     trades, pairs = backtest(cfg)
     print(f"\nPairs genutzt: {pairs}")

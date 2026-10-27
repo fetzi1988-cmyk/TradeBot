@@ -77,6 +77,8 @@ def main(target_bars=3000, limit_pairs=None):
             fehler.append((key, f"nur {len(rows)} Kerzen"))
             continue
         df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        # datetime-Spalte, die feature_engine.build_features erwartet (ISO-UTC)
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         df.to_csv(os.path.join(CANDLES, f"{key}_{TF}.csv"), index=False)
         ok += 1
         if i % 20 == 0 or i == len(pairs):
