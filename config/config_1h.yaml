@@ -44,6 +44,13 @@ data:
   features_suffix: "_1h_features.csv"
   trades_log: "logs/trades_1h.csv"
 
+# --- Live-Runner (core/live_runner_1h.py) ---
+live:
+  enabled: false          # false = PAPER (nur Log). true = echte ccxt-Orders.
+  # Nur diese zwei Strategien gehen live (robust im Fill-Qualitaets-Test 2026-10):
+  #   rsi_cross, pullback. Der Rest bleibt vorerst draussen.
+  # Realistische Kosten im Runner fest: Maker-Entry 0.10% + Taker-Exit 0.15%.
+
 # --- Backtest ---
 backtest:
   # pessimistische Fill-Annahme: Low vor High in derselben Kerze pruefen
