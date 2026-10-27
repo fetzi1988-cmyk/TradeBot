@@ -115,9 +115,10 @@ def main():
         market = pd.Series(eq_hold, index=dt)
         src = "Korb-Index (eigener Trend)"
 
-    # Regime auf TAGESBASIS: Markt-Serie auf Tage resampeln, 30-Tage-MA,
-    # Entscheidung aus dem VORTAG (kein Look-ahead).
-    REGIME_MA_DAYS = 30
+    # Regime auf TAGESBASIS: Markt-Serie auf Tage resampeln, MA, Entscheidung
+    # aus dem VORTAG (kein Look-ahead). MA-Tage via argv[3] (Default 30; fuer
+    # saubere Tagesdaten besser 100-200).
+    REGIME_MA_DAYS = int(sys.argv[3]) if len(sys.argv) > 3 else 30
     daily = market.resample("1D").last().ffill()
     ma_daily = daily.rolling(REGIME_MA_DAYS, min_periods=10).mean()
     on = (daily > ma_daily).shift(1).fillna(False)   # Vortag -> kein Look-ahead
