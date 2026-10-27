@@ -36,7 +36,7 @@ FILL_WINDOW = 2        # so viele Kerzen hat die Limit-Order Zeit, gefuellt zu w
 STRATS = ["rsi_cross", "pullback"]
 
 
-def run(cfg, candles_dir):
+def run(cfg, candles_dir, fill_mode="touch"):
     ex = cfg["exit"]
     files = sorted(glob.glob(os.path.join(candles_dir, "*_1h_features.csv")))
     trades = []
@@ -77,11 +77,16 @@ def run(cfg, candles_dir):
                 signals_total += 1
 
                 # --- Fill-Simulation: Limit-Buy wird gefuellt, wenn Preis zurueckkommt
+                #   touch: Docht beruehrt Limit (low <= limit)         -> optimistisch
+                #   close: Kerze schliesst UNTER Limit (close < limit)  -> konservativ,
+                #          verlangt echtes Handelsvolumen unter dem Preis, kein reiner Wick
                 fill_bar = None
                 for j in range(1, FILL_WINDOW + 1):
                     if i + j >= n:
                         break
-                    if low[i + j] <= limit_price:
+                    hit = (low[i + j] <= limit_price) if fill_mode == "touch" \
+                          else (close[i + j] < limit_price)
+                    if hit:
                         fill_bar = i + j
                         break
                 if fill_bar is None:
@@ -112,15 +117,18 @@ def run(cfg, candles_dir):
     return trades, signals_total, filled_total
 
 
-def report(trades, sig_total, fill_total):
+def report(trades, sig_total, fill_total, fill_mode="touch"):
     rows = [{"pair": t.pair, "strategy": t.strategy, "entry_ts": t.entry_ts,
              "gross_pct": t.gross_pct, "net_pct": t.net_pct} for t in trades]
     r = pd.DataFrame(rows)
     r["_dt"] = pd.to_datetime(r["entry_ts"], errors="coerce", utc=True)
     fr = fill_total / sig_total * 100 if sig_total else 0
 
+    mode_txt = {"touch": "TOUCH (Docht beruehrt Limit, optimistisch)",
+                "close": "CLOSE (Kerze schliesst unter Limit, konservativ)"}.get(fill_mode, fill_mode)
     print("=" * 84)
     print(f"ENDVISION-1h MAKER-BACKTEST  (Limit-Entry, Maker-Kosten {COST_MAKER}%, kein Slippage)")
+    print(f"Fill-Modus: {mode_txt}")
     print(f"Signale={sig_total}  gefuellt={fill_total}  Fill-Rate={fr:.1f}%  Trades={len(r)}")
     print(f"Vergleich: Taker war {COST_TAKER}% + Slippage; Maker ist {COST_MAKER}% fix")
     print("=" * 84)
@@ -157,5 +165,27 @@ if __name__ == "__main__":
     candles = sys.argv[2] if len(sys.argv) > 2 else "data/candles"
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
-    trades, st, ft = run(cfg, candles)
-    report(trades, st, ft)
+
+    # Beide Fill-Modi nacheinander: erst der konservative (der entscheidet, ob wir live gehen),
+    # dann der optimistische als Obergrenze. Dazwischen ein Fazit, das beide gegenueberstellt.
+    summary = {}
+    for mode in ("close", "touch"):
+        trades, st, ft = run(cfg, candles, fill_mode=mode)
+        r = report(trades, st, ft, fill_mode=mode)
+        g = r["net_pct"]
+        rs = np.sort(g.values)[::-1]
+        wo5 = rs[5:].mean() if len(g) > 5 else g.mean()
+        summary[mode] = (len(r), ft / st * 100 if st else 0, g.mean(), wo5)
+        print()
+
+    print("=" * 84)
+    print("FAZIT  — haelt die Kante auch unter der strengen Annahme?")
+    print("=" * 84)
+    for mode in ("close", "touch"):
+        n, fr, mean, wo5 = summary[mode]
+        tag = "konservativ" if mode == "close" else "optimistisch"
+        verdict = "TRAEGT" if (mean > 0 and wo5 > 0) else "KIPPT"
+        print(f"  {mode:5s} ({tag:12s}): Fill={fr:4.1f}%  net-mean={mean:+.4f}%  "
+              f"ohneT5={wo5:+.4f}%  Trades={n}  -> {verdict}")
+    print("\nEntscheidend ist die 'close'-Zeile: nur wenn die Kante DORT positiv und")
+    print("nicht tail-abhaengig ist, bauen wir den Live-Bot. 'touch' ist die Obergrenze.")
