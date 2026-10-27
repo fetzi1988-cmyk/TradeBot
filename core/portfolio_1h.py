@@ -41,8 +41,13 @@ class Trade:
     mae_pct: float = 0.0
 
     def __post_init__(self):
+        # UNIT-FIX 2026-10-27: atr_pct ist ein BRUCH (ATR/Preis, z.B. 0.0108 = 1.08%).
+        # Alle Renditen hier sind in PROZENT (lo_ret = (low/entry-1)*100), deshalb muss
+        # atr_pct * 100 verwendet werden. Vorher fehlte das -> Stops/Trail 100x zu eng,
+        # jeder Trade stoppte sofort im Rauschen (Integritaets-Check 27.10.2026).
+        self._atr_ret = self.atr_pct * 100.0            # ATR in Prozent-Rendite
         # Initial-Stop: init_stop_atr * ATR unter dem Entry
-        self.stop_ret_pct = -self.init_stop_atr * self.atr_pct
+        self.stop_ret_pct = -self.init_stop_atr * self._atr_ret
 
     def update_bar(self, high: float, low: float, close: float, ts: str,
                    cost_round_trip_pct: float) -> bool:
@@ -66,12 +71,12 @@ class Trade:
             self.peak_ret_pct = hi_ret
 
         # 3) Trail scharfschalten, sobald MFE die arm-Schwelle erreicht
-        if not self.armed and self.peak_ret_pct >= self.arm_mfe_atr * self.atr_pct:
+        if not self.armed and self.peak_ret_pct >= self.arm_mfe_atr * self._atr_ret:
             self.armed = True
 
         # 4) Trail nachziehen
         if self.armed:
-            new_stop = self.peak_ret_pct - self.trail_atr * self.atr_pct
+            new_stop = self.peak_ret_pct - self.trail_atr * self._atr_ret
             if new_stop > self.stop_ret_pct:
                 self.stop_ret_pct = new_stop
 

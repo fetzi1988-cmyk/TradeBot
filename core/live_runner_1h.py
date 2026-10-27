@@ -49,10 +49,10 @@ COST_EXIT_PCT = 0.15
 
 def sized_stake(equity, risk_pct, init_stop_atr, atr_pct, max_frac):
     """Positionsgroesse: so, dass bei Initial-Stop genau risk_pct der Equity faellt.
-    stop_distance_pct = init_stop_atr * atr_pct  (atr_pct ist in %-Einheiten, z.B. 0.8).
-    stake = equity * risk_pct / stop_distance_pct, gedeckelt auf max_frac der Equity.
-    (Fix gegenueber portfolio_1h.position_size, das faelschlich * 100 rechnete.)"""
-    stop_distance_pct = init_stop_atr * atr_pct
+    atr_pct ist ein BRUCH (z.B. 0.0108 = 1.08%), daher * 100 fuer die Prozent-Distanz.
+    stop_distance_pct = init_stop_atr * atr_pct * 100
+    stake = equity * risk_pct / stop_distance_pct, gedeckelt auf max_frac der Equity."""
+    stop_distance_pct = init_stop_atr * atr_pct * 100.0
     if stop_distance_pct <= 0:
         return 0.0
     stake = equity * risk_pct / stop_distance_pct

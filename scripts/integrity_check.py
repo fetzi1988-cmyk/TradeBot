@@ -80,9 +80,9 @@ print(f"    Median = {med:.5f}  ->  Einheit ist {einheit}")
 print("\n[B] Stop-Distanz der Engine (2.5 * atr_pct) vs. typische 1-Bar-Bewegung:")
 # Die Engine setzt stop_ret_pct = -2.5*atr_pct und vergleicht gegen lo_ret in %.
 # D.h. sie INTERPRETIERT 2.5*atr_pct als Prozentwert.
-stop_used_as_pct = INIT_STOP_ATR * med          # so wie die Engine es als % nimmt
+stop_used_as_pct = INIT_STOP_ATR * med * 100.0   # korrigierte Engine: atr_pct*100 = %
 typ_move_pct = np.median(bar_moves)
-print(f"    Engine-Stop  = 2.5 * {med:.5f} = {stop_used_as_pct:.5f}  (als % interpretiert)")
+print(f"    Engine-Stop  = 2.5 * {med:.5f} * 100 = {stop_used_as_pct:.4f}%  (korrigierte Engine)")
 print(f"    typ. Bar-Bewegung (Median |ret|) = {typ_move_pct:.4f} %")
 ratio = stop_used_as_pct / typ_move_pct if typ_move_pct else 0
 print(f"    Verhaeltnis Stop/Bar = {ratio:.2f}")
@@ -102,15 +102,15 @@ for s in STRATS:
     v = np.concatenate([a for a in atr_at_sig[s] if len(a)]) if any(len(a) for a in atr_at_sig[s]) else np.array([])
     if len(v):
         print(f"      {s:18s} n={len(v):5d}  Median atr_pct={np.median(v):.5f}  "
-              f"-> Stop als % = {INIT_STOP_ATR*np.median(v):.4f}")
+              f"-> Stop als % = {INIT_STOP_ATR*np.median(v)*100:.4f}")
 
 # [C] echte Trades Bar fuer Bar
 print("\n[C] 5 echte rsi_cross-Trades Bar fuer Bar (so wie die Engine sie sieht):")
 print("    Entry=Signal-Close. Renditen in % vom Entry. Stop(init) = -2.5*atr_pct (als %).")
 for pair, ii, d in examples:
     entry = d["close"].values[ii]; atr = d["atr_pct"].values[ii]
-    stop_pct = -INIT_STOP_ATR * atr
-    print(f"\n    {pair}  Entry@{entry:.6g}  atr_pct={atr:.5f}  init-Stop={stop_pct:+.4f}%")
+    stop_pct = -INIT_STOP_ATR * atr * 100.0
+    print(f"\n    {pair}  Entry@{entry:.6g}  atr_pct={atr:.5f}  init-Stop={stop_pct:+.3f}%")
     line = []
     for j in range(1, 9):
         if ii + j >= len(d):
@@ -125,7 +125,7 @@ for pair, ii, d in examples:
         print("\n".join(line))
 
 print("\n" + "=" * 80)
-print("VERDIKT: Ist [A] ein BRUCH und [B]-Verhaeltnis < 0.2, dann rechnet die")
-print("Portfolio-Engine mit 100x zu engen Stops -> das +266%-Replay ist ein")
-print("Einheiten-Artefakt und MUSS korrigiert und neu gerechnet werden.")
-print("Ist das Verhaeltnis in [B] bei ~2-3, passen die Einheiten und das Replay haelt.")
+print("VERDIKT (nach Unit-Fix): atr_pct ist ein BRUCH, die Engine rechnet jetzt")
+print("atr_pct*100. Liegt das [B]-Verhaeltnis bei ~2-3 und halten die Trades in [C]")
+print("mehrere Bars, sitzen die Stops korrekt -> Backtests sind jetzt gueltig und")
+print("muessen NEU gerechnet werden (die alten +0.27%/+266% waren das Artefakt).")
