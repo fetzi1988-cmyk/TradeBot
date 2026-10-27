@@ -1,0 +1,137 @@
+"""
+REGIME-HALTEN — Beta kassieren, Crash aussitzen (der eine ehrliche Hebel).
+
+Befund des Projekts: aktive Strategien verlieren, nur HALTEN macht Plus (Beta),
+aber mit brutalem Drawdown. Ein Bot kann hier keine Rendite ERZEUGEN; er kann
+nur das RISIKO steuern. Dieser Test prueft die einzige Idee, die uebrig bleibt:
+
+  - Markt-Schalter per BTC: solange BTC ueber seinem langen Durchschnitt liegt
+    (REGIME_MA Bars), ist der Markt "risk-on" -> Gleichgewicht-Korb halten.
+  - Faellt BTC darunter -> "risk-off" -> komplett Cash, Crash aussitzen.
+  - EIN grober Schalter fuer das GANZE Buch (kein Per-Coin-Timing -> kein Whipsaw).
+
+EHRLICHKEIT:
+  - Per-Bar-Coin-Renditen werden auf +-CLIP gekappt, um die Mikro-Coin-Pump-Fata-
+    Morgana (ein Coin +5000% = Index-Artefakt) zu entschaerfen. Das macht die Zahl
+    konservativer und handelbarer.
+  - Regime-Entscheidung nutzt nur Vergangenheit (BTC-Schluss t-1 vs MA t-1).
+  - Vergleich: IMMER-HALTEN vs REGIME-GESCHALTET. Frage: kappt der Schalter den
+    Drawdown deutlich und behaelt genug vom Plus?
+
+Aufruf:
+  .venv/bin/python3 /root/TradeBot/core/regime_hold.py data/candles 1h
+"""
+from __future__ import annotations
+import sys, glob, os, warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+import pandas as pd
+
+CANDLES = sys.argv[1] if len(sys.argv) > 1 else "data/candles"
+TF = sys.argv[2] if len(sys.argv) > 2 else "1h"
+BARS_PER_DAY = {"1h": 24, "5m": 288, "4h": 6, "1d": 1}.get(TF, 24)
+REGIME_MA = 30 * BARS_PER_DAY     # ~30 Tage BTC-Durchschnitt als Markt-Regime
+CLIP = 0.30                        # Per-Bar-Coin-Rendite auf +-30% kappen (Outlier-Schutz)
+SWITCH_FEE = 0.001                 # 0.10% Gebuehr beim Ein-/Aussteigen des ganzen Korbs
+
+
+def load_matrix():
+    pat = os.path.join(CANDLES, f"*_{TF}_features.csv")
+    files = sorted(glob.glob(pat)) or sorted(
+        f for f in glob.glob(os.path.join(CANDLES, f"*_{TF}.csv"))
+        if not f.endswith(f"_{TF}_features.csv"))
+    ser = {}
+    for fp in files:
+        pair = os.path.basename(fp).replace(f"_{TF}_features.csv", "").replace(f"_{TF}.csv", "")
+        try:
+            d = pd.read_csv(fp, usecols=lambda c: c in ("timestamp", "close"))
+        except Exception:
+            continue
+        if "close" not in d.columns or len(d) < 60:
+            continue
+        d["close"] = pd.to_numeric(d["close"], errors="coerce")
+        ts = d["timestamp"].astype("int64")
+        if ts.median() < 1e12:
+            ts = ts * 1000
+        ser[pair] = pd.Series(d["close"].values, index=ts.values)
+    if not ser:
+        return None, None
+    px = pd.DataFrame(ser).sort_index()
+    px = px[~px.index.duplicated(keep="last")]
+    btc_col = next((c for c in ("BTC_USDC", "BTC_USDT", "BTCUSDC", "BTCUSDT") if c in px.columns), None)
+    return px, btc_col
+
+
+def dd(eq):
+    peak = np.maximum.accumulate(eq)
+    return float(np.max((peak - eq) / peak) * 100)
+
+
+def monthly(eq, idx):
+    s = pd.Series(eq, index=pd.to_datetime(idx, unit="ms", utc=True))
+    m = s.resample("MS").last() / s.resample("MS").first() - 1
+    return "  ".join(f"{t.strftime('%Y-%m')}:{v*100:+.0f}%" for t, v in m.items() if np.isfinite(v))
+
+
+def rep(name, eq, idx, extra=""):
+    end = eq[-1]; ret = (end / 1000 - 1) * 100
+    days = (idx[-1] - idx[0]) / 86400000.0
+    ann = ((end / 1000) ** (365.0 / days) - 1) * 100 if days > 0 else 0
+    print(f"\n### {name}")
+    print(f"  Start 1000 -> Ende {end:.0f} USDC  ({ret:+.1f}%, ann ~{ann:+.0f}%)  ueber {days:.0f} Tage{extra}")
+    print(f"  Max-Drawdown = {dd(eq):.1f}%")
+    print(f"  Monate: {monthly(eq, idx)}")
+
+
+def main():
+    px, btc = load_matrix()
+    if px is None:
+        print(f"Keine {TF}-Daten in {CANDLES}."); return
+    idx = px.index.values
+    rets = np.clip(px.pct_change().values, -CLIP, CLIP)   # Outlier-gekappt
+    basket = np.nan_to_num(np.nanmean(rets, axis=1), nan=0.0)
+
+    print("=" * 92)
+    print(f"REGIME-HALTEN   {px.shape[1]} Coins, TF={TF}, {len(idx)} Bars   (Per-Bar-Rendite auf +-{CLIP*100:.0f}% gekappt)")
+    print("=" * 92)
+
+    eq_hold = 1000 * np.cumprod(1 + basket)
+    rep("IMMER-HALTEN (gekappter Gleichgewicht-Korb)", eq_hold, idx)
+
+    if btc is None:
+        print("\nKein BTC-Pair gefunden (BTC_USDC/BTC_USDT) -> Regime-Schalter nicht moeglich.")
+        print("Sag mir, wie dein BTC-Pair heisst, dann haenge ich es ein.")
+        return
+
+    bt = px[btc].values.astype(float)
+    bt_ma = pd.Series(bt).rolling(REGIME_MA).mean().values
+    # risk_on fuer Bar i aus Info bis i-1 (kein Look-ahead)
+    risk_on = np.zeros(len(idx), bool)
+    for i in range(1, len(idx)):
+        if np.isfinite(bt_ma[i-1]) and bt[i-1] > bt_ma[i-1]:
+            risk_on[i] = True
+
+    eq = 1000.0; curve = np.empty(len(idx)); curve[0] = 1000.0; invested = False
+    days_in = 0
+    for i in range(1, len(idx)):
+        if risk_on[i]:
+            eq *= (1 + basket[i])
+            days_in += 1
+            if not invested:
+                eq *= (1 - SWITCH_FEE); invested = True   # einsteigen
+        else:
+            if invested:
+                eq *= (1 - SWITCH_FEE); invested = False   # aussteigen in Cash
+        curve[i] = eq
+    pct_in = days_in / (len(idx) - 1) * 100
+    rep(f"REGIME-GESCHALTET (BTC > {REGIME_MA//BARS_PER_DAY}-Tage-MA = halten, sonst Cash)",
+        curve, idx, extra=f"   [{pct_in:.0f}% der Zeit im Markt]")
+
+    print("\n" + "=" * 92)
+    print("LESART: Drueckt REGIME-GESCHALTET den Max-Drawdown deutlich unter IMMER-HALTEN")
+    print("und behaelt einen grossen Teil des Plus -> DAS ist deine Maschine: Prozente")
+    print("mitnehmen, Crash aussitzen. Bringt der Schalter nichts -> das Ende der Fahnenstange.")
+
+
+if __name__ == "__main__":
+    main()
