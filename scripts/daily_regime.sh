@@ -13,11 +13,11 @@ set -u
 cd /root/trading-system || exit 1
 VENV=.venv/bin/python3
 LOG=logs/regime_cron.log
-MAJORS="BTC_USDT,BTC_USDC,ETH_USDC,SOL_USDC,BNB_USDC,XRP_USDC"
 
 mkdir -p logs
 echo "" >> "$LOG"
 echo "===== $(date -u +'%Y-%m-%d %H:%M UTC') : taeglicher Regime-Check =====" >> "$LOG"
-$VENV /root/TradeBot/scripts/collect_daily.py 400 "$MAJORS" >> "$LOG" 2>&1
+# Tagesdaten ALLER bekannten Coins holen (fuer das Top-40-Volumen-Ranking) + BTC/USDT-Taktgeber
+$VENV /root/TradeBot/scripts/collect_daily.py 400 >> "$LOG" 2>&1
 $VENV /root/TradeBot/core/regime_live.py >> "$LOG" 2>&1
 echo "----- fertig -----" >> "$LOG"

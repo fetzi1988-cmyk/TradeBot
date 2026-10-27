@@ -25,7 +25,8 @@ import pandas as pd
 
 DAILY_DIR = "data/daily"
 REGIME_MA_DAYS = 150
-MAJORS = ["BTC_USDC", "ETH_USDC", "SOL_USDC", "BNB_USDC", "XRP_USDC"]
+TOP_N = 40                 # Korb = die TOP_N groessten Coins nach Volumen
+FALLBACK = ["BTC_USDC", "ETH_USDC", "SOL_USDC", "BNB_USDC", "XRP_USDC"]
 START_CAPITAL = 1000.0
 STATE = sys.argv[1] if len(sys.argv) > 1 else "logs/regime_live_state.json"
 ENV_PATH = "/root/trading-system/.env"   # gleiche Telegram-Creds wie das alte System
@@ -68,6 +69,29 @@ def last_close(key):
     return None
 
 
+def select_universe(n=TOP_N):
+    """Top-n handelbare Coins nach Median-Quote-Volumen (close*volume), nur Coins
+    mit genug Historie (>=REGIME_MA_DAYS). USDT-Taktgeber ausgeschlossen."""
+    rows = []
+    for fp in glob.glob(os.path.join(DAILY_DIR, "*_1d.csv")):
+        key = os.path.basename(fp).replace("_1d.csv", "")
+        if key.endswith("_USDT"):
+            continue
+        try:
+            d = pd.read_csv(fp, usecols=lambda c: c in ("close", "volume"))
+        except Exception:
+            continue
+        if "close" not in d or "volume" not in d or len(d) < REGIME_MA_DAYS:
+            continue
+        qv = (pd.to_numeric(d["close"], errors="coerce") *
+              pd.to_numeric(d["volume"], errors="coerce")).median()
+        if np.isfinite(qv) and qv > 0:
+            rows.append((key, qv))
+    rows.sort(key=lambda x: -x[1])
+    sel = [k for k, _ in rows[:n]]
+    return sel if sel else FALLBACK
+
+
 def btc_regime():
     """risk_on, letzter BTC-Close, 150-Tage-MA — aus der tiefsten BTC-Datei."""
     cand = [os.path.join(DAILY_DIR, f"{k}_1d.csv") for k in ("BTC_USDT", "BTC_USDC")]
@@ -101,8 +125,10 @@ def main():
     print("=" * 76)
 
     actions = []
-    prices = {k: last_close(k) for k in MAJORS}
-    avail = [k for k in MAJORS if prices.get(k)]
+    universe = select_universe(TOP_N)
+    print(f"  Universum: Top {len(universe)} nach Volumen -> {', '.join(universe[:10])}{' ...' if len(universe) > 10 else ''}")
+    prices = {k: last_close(k) for k in universe}
+    avail = [k for k in universe if prices.get(k)]
 
     if risk_on and not st["invested"]:
         # Korb kaufen: Cash gleichmaessig auf verfuegbare Majors

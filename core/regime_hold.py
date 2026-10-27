@@ -64,6 +64,28 @@ def load_matrix():
     return px, btc_col
 
 
+def top_by_volume(candles_dir, tf, n):
+    """Top-n Keys nach Median-Quote-Volumen (close*volume) ueber die Historie.
+    Naeherung fuer 'die groessten/liquidesten Coins'. _USDC bevorzugt (handelbar)."""
+    rows = []
+    for fp in glob.glob(os.path.join(candles_dir, f"*_{tf}*.csv")):
+        key = os.path.basename(fp).replace(f"_{tf}_features.csv", "").replace(f"_{tf}.csv", "")
+        if key.endswith("_USDT"):      # USDT-Taktgeber nicht in den Korb
+            continue
+        try:
+            d = pd.read_csv(fp, usecols=lambda c: c in ("close", "volume"))
+        except Exception:
+            continue
+        if "close" not in d or "volume" not in d or len(d) < 60:
+            continue
+        qv = (pd.to_numeric(d["close"], errors="coerce") *
+              pd.to_numeric(d["volume"], errors="coerce")).median()
+        if np.isfinite(qv) and qv > 0:
+            rows.append((key, qv))
+    rows.sort(key=lambda x: -x[1])
+    return [k for k, _ in rows[:n]]
+
+
 def dd(eq):
     peak = np.maximum.accumulate(eq)
     return float(np.max((peak - eq) / peak) * 100)
@@ -90,18 +112,27 @@ def main():
     if px is None:
         print(f"Keine {TF}-Daten in {CANDLES}."); return
     idx = px.index.values
-    # optionaler Instrument-Filter: argv[4] = Komma-Liste von Key-Fragmenten
-    # (z.B. "BTC_USDT" oder "BTC_,ETH_,SOL_,BNB_,XRP_"). Ohne -> alle Coins.
-    wl = [w.strip() for w in sys.argv[4].split(",")] if len(sys.argv) > 4 else None
-    bcols = [c for c in px.columns if (wl is None or any(w in c for w in wl))]
+    # optionaler Instrument-Filter: argv[4]
+    #   "top40"  -> die 40 groessten Coins nach Volumen
+    #   "BTC_,ETH_,..." -> Komma-Liste von Key-Fragmenten
+    #   ohne -> alle Coins
+    a4 = sys.argv[4].strip() if len(sys.argv) > 4 else None
+    if a4 and a4.lower().startswith("top") and a4[3:].isdigit():
+        topkeys = set(top_by_volume(CANDLES, TF, int(a4[3:])))
+        bcols = [c for c in px.columns if c in topkeys]
+    elif a4:
+        wl = [w.strip() for w in a4.split(",")]
+        bcols = [c for c in px.columns if any(w in c for w in wl)]
+    else:
+        bcols = list(px.columns)
     rets = np.clip(px[bcols].pct_change().values, -CLIP, CLIP)   # Outlier-gekappt
     basket = np.nan_to_num(np.nanmean(rets, axis=1), nan=0.0)
 
     print("=" * 92)
     print(f"REGIME-HALTEN   Korb={len(bcols)} Coins von {px.shape[1]}, TF={TF}, {len(idx)} Bars   "
           f"(Per-Bar auf +-{CLIP*100:.0f}% gekappt)")
-    if wl is not None:
-        print(f"  Instrument-Filter: {wl}  ->  {', '.join(bcols[:12])}{' ...' if len(bcols) > 12 else ''}")
+    if a4:
+        print(f"  Instrument-Filter: '{a4}'  ->  {len(bcols)} Coins: {', '.join(bcols[:12])}{' ...' if len(bcols) > 12 else ''}")
     print("=" * 92)
 
     eq_hold = 1000 * np.cumprod(1 + basket)
