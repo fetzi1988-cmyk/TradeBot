@@ -66,11 +66,12 @@ def save(rows, key):
     return True
 
 
-def main(target=1500):
+def main(target=1500, whitelist=None):
     os.makedirs(OUT, exist_ok=True)
     ex = ccxt.binance({"enableRateLimit": True})
-    # BTC/USDT immer dazu (tiefer Regime-Taktgeber)
-    keys = known_keys()
+    # whitelist (Komma-Liste von Keys) -> nur diese; sonst alle bekannten Pairs.
+    # BTC/USDT kommt immer als tiefer Regime-Taktgeber dazu.
+    keys = whitelist if whitelist else known_keys()
     print(f"Sammle {TF}-Historie fuer {len(keys)} Pairs + BTC/USDT, Ziel ~{target} Tage")
     ok, err = 0, []
     # erst der Taktgeber
@@ -98,4 +99,5 @@ def main(target=1500):
 
 if __name__ == "__main__":
     tb = int(sys.argv[1]) if len(sys.argv) > 1 else 1500
-    main(tb)
+    wl = [k.strip() for k in sys.argv[2].split(",")] if len(sys.argv) > 2 else None
+    main(tb, wl)

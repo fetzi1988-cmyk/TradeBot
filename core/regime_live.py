@@ -19,6 +19,7 @@ Aufruf auf dem Server (taeglich):
 """
 from __future__ import annotations
 import sys, os, glob, json, time
+import urllib.request, urllib.parse
 import numpy as np
 import pandas as pd
 
@@ -27,6 +28,35 @@ REGIME_MA_DAYS = 150
 MAJORS = ["BTC_USDC", "ETH_USDC", "SOL_USDC", "BNB_USDC", "XRP_USDC"]
 START_CAPITAL = 1000.0
 STATE = sys.argv[1] if len(sys.argv) > 1 else "logs/regime_live_state.json"
+ENV_PATH = "/root/trading-system/.env"   # gleiche Telegram-Creds wie das alte System
+
+
+def _telegram(text):
+    """Best-effort Telegram-Nachricht an denselben Chat wie das alte System.
+    Liest TELEGRAM_BOT_TOKEN/CHAT_ID aus /root/trading-system/.env oder der Umgebung."""
+    tok = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    cid = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if (not tok or not cid) and os.path.exists(ENV_PATH):
+        try:
+            for ln in open(ENV_PATH):
+                ln = ln.strip()
+                if ln.startswith("TELEGRAM_BOT_TOKEN="):
+                    tok = ln.split("=", 1)[1].strip().strip('"').strip("'")
+                elif ln.startswith("TELEGRAM_CHAT_ID="):
+                    cid = ln.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    if not tok or not cid:
+        print("  [Telegram] keine Creds (.env) gefunden -> nur Log.")
+        return
+    try:
+        url = f"https://api.telegram.org/bot{tok}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": cid, "text": text}).encode()
+        with urllib.request.urlopen(urllib.request.Request(url, data=data, method="POST"), timeout=20) as r:
+            ok = json.loads(r.read().decode()).get("ok")
+        print(f"  [Telegram] gesendet ok={ok}")
+    except Exception as e:
+        print(f"  [Telegram] Fehler: {e}")
 
 
 def last_close(key):
@@ -101,6 +131,16 @@ def main():
     print(f"\n  Status: {pos}   equity~{mtm:.0f} USDC   State: {STATE}")
     if not cfg_live:
         print("  PAPER-Modus: keine echten Orders gesendet.")
+
+    # Telegram-Rueckmeldung (gleicher Chat wie das alte System)
+    mode = "LIVE" if cfg_live else "PAPER"
+    regime_txt = "RISK-ON (Majors halten)" if risk_on else "RISK-OFF (alles USDC)"
+    msg = [f"🤖 Regime-Bot [{mode}]  {time.strftime('%Y-%m-%d')}",
+           f"BTC {bc:.0f}  vs  150-Tage-MA {ma:.0f}",
+           f"→ {regime_txt}"]
+    msg += actions
+    msg.append(f"Status: {pos}, equity ~{mtm:.0f} USDC")
+    _telegram("\n".join(msg))
 
 
 if __name__ == "__main__":
