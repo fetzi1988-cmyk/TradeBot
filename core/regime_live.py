@@ -25,7 +25,7 @@ import pandas as pd
 
 DAILY_DIR = "data/daily"
 REGIME_MA_DAYS = 150
-TOP_N = int(os.getenv("REGIME_TOPN", "10"))   # Korb-Breite (Default 10; per REGIME_TOPN aenderbar)
+TOP_N = int(os.getenv("REGIME_TOPN", "5"))   # Korb-Breite (Default 5; eng gewinnt messbar; per REGIME_TOPN aenderbar)
 FALLBACK = ["BTC_USDC", "ETH_USDC", "SOL_USDC", "BNB_USDC", "XRP_USDC"]
 START_CAPITAL = 1000.0
 STATE = sys.argv[1] if len(sys.argv) > 1 else "logs/regime_live_state.json"
