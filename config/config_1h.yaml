@@ -1,0 +1,51 @@
+# ENDVISION-1h — Konfiguration
+# Eigenstaendiges 1h-System, parallel zum 5m-ENDVISION. Kein momentum.
+# WICHTIG: Alle ATR-Faktoren sind STARTWERTE, abgeleitet aus dem besten
+# 1h-Trailing-Test (Aug 2026: init=2.5 / arm=1.0 / trail=1.5 ATR).
+# Sie MUESSEN im Backtest validiert werden, bevor live gehandelt wird.
+
+timeframe: "1h"
+
+# --- Kosten (das Herzstueck, das dem 5m-System fehlte) ---
+costs:
+  round_trip_pct: 0.235   # Taker 0.20% + Median-Spread 0.035%, additiv
+  # Bei spaeterem Maker-Entry hier auf ~0.10 senken und neu backtesten.
+
+# --- Strategien (8, ohne momentum) ---
+# 'enabled' schaltet eine Strategie hart aus (wie settings.yaml im 5m-System).
+enabled_strategies:
+  - pullback
+  - breakout
+  - trend
+  - rsi_cross
+  - range
+  - reversal
+  - squeeze_sniper
+  - trend_rider
+
+# --- Exit (ATR-relativ, pro Coin adaptiv — Fetzis Eigenlebens-Prinzip) ---
+exit:
+  init_stop_atr: 2.5      # Initial-Stop weit genug, um Drawdown zu ueberleben
+  arm_mfe_atr: 1.0        # ab diesem MFE (in ATR) schaltet der Trail scharf
+  trail_atr: 1.5          # Trail zieht trail_atr unter dem Hoch nach
+  max_hold_bars: 12       # 12 x 1h = 180min max. Haltedauer
+  # Pro Strategie ueberschreibbar (leer = nutzt die Defaults oben):
+  per_strategy: {}
+
+# --- Risiko / Positionsgroesse ---
+risk:
+  risk_per_trade_pct: 1.0   # max. 1% Kapitalrisiko pro Trade (Stop-Abstand)
+  max_open_trades: 6
+  start_capital_usdc: 1000.0
+
+# --- Daten ---
+data:
+  candles_dir: "data/candles"          # *_1h.csv und *_1h_features.csv
+  features_suffix: "_1h_features.csv"
+  trades_log: "logs/trades_1h.csv"
+
+# --- Backtest ---
+backtest:
+  # pessimistische Fill-Annahme: Low vor High in derselben Kerze pruefen
+  pessimistic_fills: true
+  min_rows_per_pair: 60

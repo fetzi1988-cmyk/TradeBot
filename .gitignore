@@ -1,0 +1,8 @@
+# Daten und Logs gehoeren nicht ins Repo (zu gross, laufend geaendert)
+data/candles/*.csv
+logs/*.csv
+logs/*.log
+__pycache__/
+*.pyc
+.venv/
+*.tar.gz
