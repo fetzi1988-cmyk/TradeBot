@@ -27,7 +27,7 @@ DAILY_DIR = "data/daily"
 REGIME_MA_DAYS = 150
 TOP_N = int(os.getenv("REGIME_TOPN", "5"))   # Korb-Breite (Default 5; eng gewinnt messbar; per REGIME_TOPN aenderbar)
 FALLBACK = ["BTC_USDC", "ETH_USDC", "SOL_USDC", "BNB_USDC", "XRP_USDC"]
-START_CAPITAL = 1000.0
+START_CAPITAL = float(os.getenv("REGIME_CAPITAL", "100"))   # Startkapital in USDC (klein; per REGIME_CAPITAL aenderbar, z.B. 50)
 STATE = sys.argv[1] if len(sys.argv) > 1 else "logs/regime_live_state.json"
 ENV_PATH = "/root/trading-system/.env"   # gleiche Telegram-Creds wie das alte System
 
@@ -126,49 +126,72 @@ def main():
     print(f"  BTC={bc:.0f}  150-Tage-MA={ma:.0f}  ->  Regime: {'RISK-ON (halten)' if risk_on else 'RISK-OFF (Cash)'}   [{src}]")
     print("=" * 76)
 
-    actions = []
+    term = []
     universe = select_universe(TOP_N)
     print(f"  Universum: Top {len(universe)} nach Volumen -> {', '.join(universe[:10])}{' ...' if len(universe) > 10 else ''}")
     prices = {k: last_close(k) for k in universe}
     avail = [k for k in universe if prices.get(k)]
 
+    per = 0.0
     if risk_on and not st["invested"]:
-        # Korb kaufen: Cash gleichmaessig auf verfuegbare Majors
         per = st["cash"] / len(avail)
         st["holdings"] = {k: per / prices[k] for k in avail}   # Einheiten
         st["entry"] = {k: prices[k] for k in avail}
         st["cash"] = 0.0; st["invested"] = True
+        did = "buy"
         for k in avail:
-            actions.append(f"KAUF    {k:10s} fuer {per:.0f} USDC  @ {prices[k]:.6g}")
+            term.append(f"KAUF    {k:10s} fuer {per:.2f} USDC  @ {prices[k]:.6g}")
     elif (not risk_on) and st["invested"]:
-        # alles zu USDC
         val = sum(st["holdings"].get(k, 0) * prices[k] for k in avail if prices.get(k))
-        for k in avail:
-            if st["holdings"].get(k):
-                actions.append(f"VERKAUF {k:10s} @ {prices[k]:.6g}")
-        st["cash"] = val; st["holdings"] = {}; st["invested"] = False
+        for k in list(st["holdings"]):
+            term.append(f"VERKAUF {k:10s} @ {prices.get(k, 0):.6g}")
+        st["cash"] = val; st["holdings"] = {}; st.pop("entry", None); st["invested"] = False
+        did = "sell"
     else:
-        actions.append("HALTEN" if st["invested"] else "WARTEN in USDC (Regime risk-off)")
+        did = "hold" if st["invested"] else "wait"
+        term.append("HALTEN" if st["invested"] else "WARTEN in USDC")
 
-    # Equity (mark-to-market)
     mtm = st["cash"] + sum(st["holdings"].get(k, 0) * prices[k] for k in avail if prices.get(k))
     json.dump(st, open(STATE, "w"), indent=2, default=float)
-    for a in actions:
+    for a in term:
         print("  " + a)
-    pos = "Korb gehalten" if st["invested"] else "alles USDC"
-    print(f"\n  Status: {pos}   equity~{mtm:.0f} USDC   State: {STATE}")
+    print(f"\n  Status: {'Korb gehalten' if st['invested'] else 'alles USDC'}   equity~{mtm:.2f} USDC   State: {STATE}")
     if not cfg_live:
         print("  PAPER-Modus: keine echten Orders gesendet.")
 
-    # Telegram-Rueckmeldung (gleicher Chat wie das alte System)
-    mode = "LIVE" if cfg_live else "PAPER"
-    regime_txt = "RISK-ON (Majors halten)" if risk_on else "RISK-OFF (alles USDC)"
-    msg = [f"🤖 Regime-Bot [{mode}]  {time.strftime('%Y-%m-%d')}",
-           f"BTC {bc:.0f}  vs  150-Tage-MA {ma:.0f}",
-           f"→ {regime_txt}"]
-    msg += actions
-    msg.append(f"Status: {pos}, equity ~{mtm:.0f} USDC")
-    _telegram("\n".join(msg))
+    # --- Klare, deutsche Telegram-Meldung ---
+    def de(x):
+        return f"{x:,.0f}".replace(",", ".")   # 79970 -> 79.970
+    held = [k.split("_")[0] for k in st["holdings"]]
+    pnl = (mtm / START_CAPITAL - 1) * 100 if START_CAPITAL else 0
+    L = [f"📊 Trading-Bot · {time.strftime('%d.%m.%Y %H:%M')} · {'ECHT-GELD' if cfg_live else 'PAPIER (Test)'}", ""]
+    if risk_on:
+        L.append("🟢 Markt-Ampel: GRÜN")
+        L.append(f"BTC {de(bc)}$ liegt ÜBER dem 150-Tage-Schnitt ({de(ma)}$).")
+        L.append("→ Wir sind im Markt und nehmen die Aufwärtsbewegung mit.")
+    else:
+        L.append("🔴 Markt-Ampel: ROT")
+        L.append(f"BTC {de(bc)}$ liegt UNTER dem 150-Tage-Schnitt ({de(ma)}$).")
+        L.append("→ Wir stehen in Sicherheit (USDC) und sitzen den Abschwung aus.")
+    L.append("")
+    if did == "buy":
+        L.append(f"🟢 HEUTE GEKAUFT: Korb aus {len(avail)} Coins, je ~{per:.2f} USDC")
+        L.append("→ " + ", ".join(k.split("_")[0] for k in avail))
+    elif did == "sell":
+        L.append("🔴 HEUTE VERKAUFT: Korb aufgelöst, alles zurück in USDC.")
+    elif did == "hold":
+        L.append("✅ HEUTE: keine Änderung — der Korb bleibt gehalten.")
+    else:
+        L.append("⏸️ HEUTE: keine Änderung — weiter in USDC, bis die Ampel grün wird.")
+    L.append("")
+    if st["invested"]:
+        L.append(f"📦 Im Korb ({len(held)} Coins): {', '.join(held)}")
+    else:
+        L.append("📦 Aktuell: 100% USDC (nicht investiert)")
+    L.append(f"💰 Depotwert: ~{mtm:.2f} USDC   (Start {START_CAPITAL:.0f} · {pnl:+.1f}%)")
+    if not cfg_live:
+        L += ["", "ℹ️ Testmodus — es wird noch kein echtes Geld bewegt."]
+    _telegram("\n".join(L))
 
 
 if __name__ == "__main__":

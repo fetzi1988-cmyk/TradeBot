@@ -14,6 +14,10 @@ cd /root/trading-system || exit 1
 VENV=.venv/bin/python3
 LOG=logs/regime_cron.log
 
+# --- Einstellungen (hier aendern) ---
+export REGIME_CAPITAL=100     # Startkapital in USDC (z.B. 50 oder 100)
+export REGIME_TOPN=5          # Korb-Breite (5 ist messbar am besten)
+
 mkdir -p logs
 echo "" >> "$LOG"
 echo "===== $(date -u +'%Y-%m-%d %H:%M UTC') : taeglicher Regime-Check =====" >> "$LOG"
